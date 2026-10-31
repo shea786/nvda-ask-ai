@@ -41,6 +41,14 @@ so no ChatGPT or Claude usage is spent. Nothing here is shipped; `build.py` only
   `ASKAI_SMOKE_ONLY=oldaddon` runs the whole old add-on question (Escape, asked again, No) and Escape closing the dialog
   while a request keeps running; the round6 runs answer No straight away to keep the number of windows down.
   The `new` mode and the full run still drive the round 5 service controls in the Ask dialog and were not updated.
+* `askAISmoke/synthDrivers/askaiRecorder.py`: a silent synth driver (QA only, never in the add-on) that records every
+  text NVDA hands to the synthesizer, with a time stamp, and logs it as `ASKAI-SYNTH: <text>`.
+  `ASKAI_SMOKE_ONLY=dictation` selects it (run.sh writes `[speech] synth = askaiRecorder` and turns on typed character and
+  word echo) and runs only `_dictationRecorder`: a control phrase typed with SendInput 80 ms apart (its echo must reach
+  the recorder), then Alt+D dictation with three SendInput bursts ending by the 4 s silence timeout, ending with Enter,
+  from beeps and on-demand speech modes, and closed with Alt+F4. Speech mode changes and `speech.speakTypedCharacters`
+  are spied on with time stamps, so each phase checks that the recorder got nothing between "speech off" and the
+  restore although NVDA saw every typed character, and what it got after. A recorder transcript is logged per phase.
 * `run.sh`: rebuilds the add-on, writes a fresh `userConfig` (silence synth, no welcome dialog, an `[askGPT]` section with
   `codexPath = C:\fakecodex\codex.cmd` for the migration), resets the conversation folders, `C:\smokeproject` and
   `Documents\Ask AI`, starts NVDA with debug logging on an Xvfb display, takes a screenshot at each test phase, checks that no

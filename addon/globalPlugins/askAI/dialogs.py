@@ -43,6 +43,8 @@ workDir = None
 MAX_TRANSCRIPT_ENTRIES = 100
 BEEP_INTERVAL_MS = 2000
 DICTATION_POLL_MS = 400
+# speakThen's wait when speech is not in talk mode (no synthesizer callback will come).
+NON_TALK_DELAY_MS = 400
 # How long to wait for the user to finish signing in in the browser (Claude may need a pasted code).
 LOGIN_TIMEOUT_SECONDS = 300
 # After moving focus, announcements wait until NVDA's focus is on the target control (checked every
@@ -820,7 +822,22 @@ def speakThen(message, callback):
 	except Exception:
 		log.debugWarning("Ask AI: speech callback unavailable", exc_info=True)
 		ui.message(message)
-	wx.CallLater(estimatedSpeechMs(message), callback)
+	wx.CallLater(fallbackDelayMs(message), callback)
+
+
+def fallbackDelayMs(message):
+	"""How long to wait for speakThen's callback. Only talk mode passes the message to the synthesizer
+	(beeps, on-demand and off do not), so in the other modes the callback never fires and waiting for the
+	estimated speech time would just delay the action by several seconds.
+	"""
+	try:
+		import speech
+
+		if speech.getState().speechMode != speech.SpeechMode.talk:
+			return NON_TALK_DELAY_MS
+	except Exception:
+		pass
+	return estimatedSpeechMs(message)
 
 
 def documentsFolder():

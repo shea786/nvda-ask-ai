@@ -43,7 +43,15 @@ version = 1.1.0
 minimumNVDAVersion = 2024.1
 lastTestedNVDAVersion = 2026.1
 EOF
-cat > "$CONF/nvda.ini" <<'EOF'
+# ASKAI_SMOKE_ONLY=dictation: the askaiRecorder synth (askAISmoke/synthDrivers) records what NVDA would say,
+# with typed character and word echo on.
+SYNTH=silence
+KEYBOARD=""
+if [ "$ASKAI_SMOKE_ONLY" = dictation ]; then
+	SYNTH=askaiRecorder
+	KEYBOARD="$(printf '[keyboard]\n\tspeakTypedCharacters = 1\n\tspeakTypedWords = 1')"
+fi
+cat > "$CONF/nvda.ini" <<EOF
 schemaVersion = 18
 [general]
 	showWelcomeDialogAtStartup = False
@@ -55,9 +63,10 @@ schemaVersion = 18
 	askedAllowUsageStats = True
 	allowUsageStats = False
 [speech]
-	synth = silence
+	synth = $SYNTH
+$KEYBOARD
 [askGPT]
-	codexPath = C:\fakecodex\codex.cmd
+	codexPath = C:\\fakecodex\\codex.cmd
 	beepWhileWaiting = True
 	dictationSilenceTimeout = 3
 EOF
@@ -131,7 +140,7 @@ if grep -q SLOW-FINISHED "$C/fakecodex/calls.log"; then echo "SHELL FAIL a slow 
 # Conversations are saved as JSON files, one per conversation, readable after NVDA exits.
 # Claude answers are only expected when the run includes Claude steps.
 EXPECT_CLAUDE=1
-case "$ASKAI_SMOKE_ONLY" in round6a|round6b|oldaddon) EXPECT_CLAUDE=0 ;; esac
+case "$ASKAI_SMOKE_ONLY" in round6a|round6b|oldaddon|dictation) EXPECT_CLAUDE=0 ;; esac
 python3 -I "$HERE/check-conversations.py" "$CONVERSATIONS" "$OLD_CONVERSATIONS" "$MIN_CONVERSATIONS" "$EXPECT_CLAUDE" || true
 "$WINESERVER" -k 2>/dev/null || true
 # After a wineserver crash the wine loader can wait forever on a defunct nvda.exe.

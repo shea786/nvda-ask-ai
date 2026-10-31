@@ -17,7 +17,7 @@ Licensed under the GNU General Public License version 2 ([LICENSE](LICENSE); shi
    * ChatGPT: install Node.js, then run `npm install -g @openai/codex` in a command prompt.
    * Claude: in PowerShell run `irm https://claude.ai/install.ps1 | iex`
      (or `npm install -g @anthropic-ai/claude-code`, or `winget install Anthropic.ClaudeCode`).
-2. Install `askAI-1.2.0.nvda-addon` and restart NVDA. Settings and conversations of Ask GPT 1.x are copied over,
+2. Install `askAI-1.2.1.nvda-addon` and restart NVDA. Settings and conversations of Ask GPT 1.x are copied over,
    and Ask AI offers once to remove the old Ask GPT add-on (both would use NVDA+Alt+G).
 3. NVDA menu, Preferences, Settings, **Ask AI**. Choose the service in **Account settings for**, then **Sign in to ChatGPT** or
    **Sign in to Claude** and finish the sign-in in the browser. **Default AI service** decides what new conversations use.
@@ -268,7 +268,7 @@ Windows sandbox. The add-on never passes `--dangerously-bypass-approvals-and-san
 
 ```
 python3 -m unittest discover -s tests -v     # all tests; no NVDA, Codex or Claude Code needed (never calls the real programs)
-python3 build.py                             # writes askAI-1.2.0.nvda-addon
+python3 build.py                             # writes askAI-1.2.1.nvda-addon
 python3 -m py_compile addon/globalPlugins/askAI/*.py addon/globalPlugins/askAI/providers/*.py build.py tests/*.py
 WINEPREFIX=... OUT=... bash tools/wine-smoke/run.sh   # optional: real NVDA under Wine, fake Codex and Claude Code
 ```

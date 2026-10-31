@@ -42,7 +42,7 @@ Step 1b: Claude - install Claude Code (one time)
 
 Step 2: Install the add-on
 --------------------------
-1. Press Enter on the file askAI-1.2.0.nvda-addon.
+1. Press Enter on the file askAI-1.2.1.nvda-addon.
 2. NVDA asks whether you want to install it. If it did not come from the
    NVDA Add-on Store, NVDA may warn about that. Choose Yes / Install.
 3. Restart NVDA when it asks.

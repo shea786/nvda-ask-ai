@@ -134,10 +134,10 @@ class TestUserDocs(unittest.TestCase):
 		with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
 			readme = f.read()
 		self.assertIn("GNU General Public License version 2", readme)
-		self.assertIn("askAI-1.2.0.nvda-addon", readme)
+		self.assertIn("askAI-1.2.1.nvda-addon", readme)
 		with open(os.path.join(ROOT, "tester", "TESTING.txt"), encoding="utf-8") as f:
 			testing = f.read()
-		self.assertIn("askAI-1.2.0.nvda-addon", testing)
+		self.assertIn("askAI-1.2.1.nvda-addon", testing)
 		self.assertIn("Claude", testing)
 		with open(os.path.join(ROOT, "LICENSE"), encoding="utf-8") as f:
 			license = f.read()
@@ -163,7 +163,7 @@ class TestManifest(unittest.TestCase):
 		manifest = parser["m"]
 		self.assertEqual(manifest["name"], "askAI")
 		self.assertEqual(manifest["summary"], '"Ask AI"')
-		self.assertEqual(manifest["version"], "1.2.0")
+		self.assertEqual(manifest["version"], "1.2.1")
 		self.assertEqual(manifest["author"], '"Asif Ali"')
 		self.assertEqual(manifest["url"], '"https://github.com/shea786/nvda-ask-ai"')
 		self.assertIn("ChatGPT", manifest["description"])
@@ -183,7 +183,7 @@ class TestBuild(unittest.TestCase):
 		cacheDir = os.path.join(helpers.PACKAGE_DIR, "__pycache__")
 		os.makedirs(cacheDir, exist_ok=True)
 		path = build.build(outDir)
-		self.assertEqual(os.path.basename(path), "askAI-1.2.0.nvda-addon")
+		self.assertEqual(os.path.basename(path), "askAI-1.2.1.nvda-addon")
 		with zipfile.ZipFile(path) as archive:
 			names = archive.namelist()
 			self.assertIsNone(archive.testzip())

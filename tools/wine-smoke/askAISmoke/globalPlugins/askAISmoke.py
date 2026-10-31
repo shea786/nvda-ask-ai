@@ -1160,6 +1160,223 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		yield from self._waitFor(lambda: dialogs.AskAIDialog.getInstance() is None, 3000)
 		yield 300
 
+	def _dictationRecorder(self, dialogs):
+		"""ASKAI_SMOKE_ONLY=dictation: what the synthesizer receives (askaiRecorder synth) while voice typing types,
+		with typed character and word echo on. Voice typing is simulated with SendInput bursts after the stubbed
+		Windows+H. Phases: control (normal typing is echoed), timeout, Enter, kept speech mode, Alt+F4."""
+		import speech
+		import synthDriverHandler
+
+		SM = speech.SpeechMode
+		synth = synthDriverHandler.getSynth()
+		if not report(synth is not None and synth.name == "askaiRecorder", "recorder synth is NVDA's synthesizer",
+			repr(synth.name if synth else None)):
+			return
+		recorded = sys.modules[type(synth).__module__].transcript
+		keyboard = config.conf["keyboard"]
+		report(keyboard["speakTypedCharacters"] == 1 and keyboard["speakTypedWords"] == 1, "typed character and word echo are on",
+			repr((keyboard["speakTypedCharacters"], keyboard["speakTypedWords"])))
+		config.conf["askAI"]["dictationSilenceTimeout"] = 4
+		config.conf["askAI"]["speakAnswers"] = True
+		# Every speech mode change, with its time, so "muted" is the exact span between two changes.
+		modes = []
+		originalSetMode = speech.setSpeechMode
+
+		def setModeSpy(mode, *args, **kwargs):
+			modes.append((time.monotonic(), mode))
+			info("speech mode -> %s" % mode.name)
+			return originalSetMode(mode, *args, **kwargs)
+
+		speech.setSpeechMode = setModeSpy
+		# NVDAObject.event_typedCharacter calls speech.speakTypedCharacters: proves NVDA saw the typing even when muted.
+		typed = []
+		originalTyped = speech.speakTypedCharacters
+
+		def typedSpy(ch, *args, **kwargs):
+			typed.append((time.monotonic(), ch))
+			return originalTyped(ch, *args, **kwargs)
+
+		speech.speakTypedCharacters = typedSpy
+
+		def typedIn(start, end):
+			return "".join(ch for t, ch in typed if start <= t and (end is None or t < end))
+		injected = [False]  # True when Wine did not report typed characters and the harness queues them itself.
+
+		def entries(start, end=None):
+			# Strictly before end: Windows' clock ticks every ~16 ms, and the synth only gets text once speech is on again.
+			return [(t, text) for t, text in recorded if t >= start and (end is None or t < end)]
+
+		def dump(name, start):
+			lines = ["%+.2fs %r" % (t - start, text) for t, text in entries(start)]
+			lines += ["%+.2fs [speech mode %s]" % (t - start, mode.name) for t, mode in modes if t >= start]
+			lines.sort(key=lambda line: float(line.split("s ", 1)[0]))
+			info("recorder transcript %s:\n  %s" % (name, "\n  ".join(lines) or "(nothing)"))
+
+		def mutedSpan(start):
+			"""(off time, restore time) of the first off-then-on after start, or Nones."""
+			off = next((t for t, mode in modes if t >= start and mode == SM.off), None)
+			on = next((t for t, mode in modes if off is not None and t > off and mode != SM.off), None)
+			return off, on
+
+		def typeText(text, gapMs=0):
+			"""Real keystrokes (SendInput) into the focused control; in injection mode also queue NVDA's typedCharacter
+			event for each character, as nvdaHelper would on Windows."""
+			for ch in text:
+				self.sim.Text(ch.encode("ascii"))
+				if injected[0]:
+					import eventHandler
+
+					eventHandler.queueEvent("typedCharacter", api.getFocusObject(), ch=ch)
+				if gapMs:
+					yield gapMs
+			yield 100
+
+		def startDictation(dialog, start):
+			"""Alt+D with SendInput (the Dictate button's mnemonic); wait until speech is off."""
+			token = dialog._dictateToken  # onDictate bumps it at once; the fallback must not press Dictate twice.
+			path = yield from self._combo(ord("D"), wx.MOD_ALT, lambda: dialog._dictateToken != token,
+				lambda: dialog.onDictate(None), "Alt+D")
+			off = yield from self._waitFor(lambda: dialog._dictation is not None and speech.getState().speechMode == SM.off, 15000)
+			return path, bool(off)
+
+		wx.CallAfter(dialogs.openAskDialog)
+		dialog = yield from self._waitFor(dialogs.AskAIDialog.getInstance, 8000)
+		if not report(dialog is not None, "Ask dialog open"):
+			return
+		dialog.questionCtrl.SetValue("")
+		dialog.questionCtrl.SetFocus()
+		yield 1500
+		speech.setSpeechMode(SM.talk)
+
+		# 1. Control: normal typing is echoed, so the recorder would catch dictation echo.
+		start = time.monotonic()
+		yield from typeText("control phrase", gapMs=80)
+		yield 1200
+		echoed = entries(start)
+		if not echoed:
+			info("no echo from SendInput typing: Wine's NVDA got no typedCharacter events (nvdaHelper in-process "
+				"hooks); queueing typedCharacter events with each keystroke from here on")
+			injected[0] = True
+			dialog.questionCtrl.SetValue("")
+			start = time.monotonic()
+			yield from typeText("control phrase", gapMs=80)
+			yield 1200
+			echoed = entries(start)
+		texts = [text for t, text in echoed]
+		dump("control (typed %s)" % ("SendInput + queued typedCharacter events" if injected[0] else "SendInput only"), start)
+		report(dialog.questionCtrl.GetValue() == "control phrase", "control phrase typed into the Question box",
+			repr(dialog.questionCtrl.GetValue()))
+		report(sum(1 for text in texts if len(text) == 1) >= 5 and "control" in texts,
+			"control: character and word echo reach the synthesizer", "echo source=%s %r" % (
+				"queued typedCharacter" if injected[0] else "real typedCharacter", texts))
+		phase("dictation-control")
+		dialog.questionCtrl.SetValue("")
+		yield 800
+
+		# 2. Dictation that ends by the silence timeout.
+		start = time.monotonic()
+		sent.clear()
+		path, off = yield from startDictation(dialog, start)
+		report(off, "Alt+D starts dictation and speech goes off", "path=%s sent=%r" % (path, sent))
+		report(any("Voice typing" in text for t, text in entries(start)), "recorder heard the voice typing announcement",
+			repr(entries(start)))
+		for burst in ("what is the", " capital of", " France"):
+			yield from typeText(burst)
+			yield 700
+		phase("dictation-bursts")
+		back = yield from self._waitFor(lambda: speech.getState().speechMode == SM.talk and dialog._dictation is None, 9000)
+		yield 800
+		mutedAt, restoredAt = mutedSpan(start)
+		dump("timeout", start)
+		report(dialog.questionCtrl.GetValue() == "what is the capital of France", "bursts typed into the Question box",
+			repr(dialog.questionCtrl.GetValue()))
+		report(mutedAt is not None and restoredAt is not None and not entries(mutedAt, restoredAt),
+			"timeout: synthesizer got nothing while dictating", repr(entries(mutedAt or start, restoredAt)))
+		report(typedIn(mutedAt or start, restoredAt) == "what is the capital of France",
+			"timeout: NVDA did see every dictated character (speakTypedCharacters called) while muted",
+			repr(typedIn(mutedAt or start, restoredAt)))
+		report(bool(back) and restoredAt is not None and restoredAt - (mutedAt or start) >= 4,
+			"timeout: speech back to talk after the silence timeout", "muted %.1fs" % ((restoredAt or 0) - (mutedAt or 0)))
+		after = [text for t, text in entries(restoredAt or start)]
+		report(after[:1] == ["Dictation finished. what is the capital of France"],
+			"timeout: synthesizer got Dictation finished and the dictated text", repr(after))
+
+		# 3. Enter before the timeout: speech comes back before sending; then the fake answer.
+		dialog.questionCtrl.SetValue("")
+		dialog.questionCtrl.SetFocus()
+		yield 500
+		start = time.monotonic()
+		sent.clear()
+		path, off = yield from startDictation(dialog, start)
+		yield from typeText("what is the capital of France")
+		yield 700
+		self.sim.Char(wx.WXK_RETURN)
+		sentAt = time.monotonic()
+		yield from self._waitFor(lambda: dialogs.state.pending is not None, 3000)
+		yield from self._waitFor(lambda: dialogs.state.pending is None, 30000)
+		yield 1500
+		mutedAt, restoredAt = mutedSpan(start)
+		dump("enter", start)
+		report(off and mutedAt is not None and restoredAt is not None and not entries(mutedAt, restoredAt),
+			"enter: synthesizer got nothing while dictating", repr(entries(mutedAt or start, restoredAt)))
+		# The Enter key's own "\r" also reaches speakTypedCharacters while still muted (NVDA speaks nothing for it).
+		report(typedIn(mutedAt or start, restoredAt).rstrip("\r") == "what is the capital of France",
+			"enter: NVDA did see the dictated characters while muted", repr(typedIn(mutedAt or start, restoredAt)))
+		report(restoredAt is not None and restoredAt >= sentAt - 0.05, "enter: speech restored by Enter, before the timeout",
+			"restored %.2fs after Enter" % ((restoredAt or 0) - sentAt))
+		after = [text for t, text in entries(restoredAt or start)]
+		# The synth gets NVDA's processed text: "Asking ChatGPT…" arrives as "Asking Chat GPT...".
+		asking = next((i for i, text in enumerate(after) if text.replace(" ", "").startswith("AskingChatGPT")), None)
+		answer = next((i for i, text in enumerate(after) if text == ANSWER_SPOKEN), None)
+		report(asking is not None and answer is not None and asking < answer and not any("Dictation finished" in t for t in after),
+			"enter: synthesizer got Asking ChatGPT, then the answer (no Dictation finished)", repr(after))
+
+		# 4. The user's speech mode (beeps, on-demand) is restored exactly.
+		for kept in (SM.beeps, SM.onDemand):
+			dialog.questionCtrl.SetValue("")
+			dialog.questionCtrl.SetFocus()
+			yield 500
+			speech.setSpeechMode(kept)
+			start = time.monotonic()
+			sent.clear()
+			path, off = yield from startDictation(dialog, start)
+			yield from typeText("kept mode words")
+			back = yield from self._waitFor(lambda: dialog._dictation is None, 9000)
+			yield 800
+			mutedAt, restoredAt = mutedSpan(start)
+			dump("mode %s" % kept.name, start)
+			report(off and bool(back) and speech.getState().speechMode == kept,
+				"%s: dictation muted and restored exactly %s" % (kept.name, kept.name), repr(speech.getState().speechMode))
+			report(mutedAt is not None and not entries(mutedAt, restoredAt), "%s: synthesizer got nothing while dictating" % kept.name,
+				repr(entries(start)))
+		speech.setSpeechMode(SM.talk)
+
+		# 5. Alt+F4 in the middle of dictation: speech comes back, nothing stays muted.
+		dialog.questionCtrl.SetValue("")
+		dialog.questionCtrl.SetFocus()
+		yield 500
+		start = time.monotonic()
+		sent.clear()
+		path, off = yield from startDictation(dialog, start)
+		yield from typeText("half a")
+		phase("dictation-before-altf4")
+		closePath = yield from self._combo(wx.WXK_F4, wx.MOD_ALT, lambda: dialogs.AskAIDialog.getInstance() is None,
+			dialog.Close, "Alt+F4")
+		yield 1500
+		mutedAt, restoredAt = mutedSpan(start)
+		report(dialogs.AskAIDialog.getInstance() is None, "Alt+F4 closes the dialog mid-dictation", "path=%s" % closePath)
+		report(speech.getState().speechMode == SM.talk and dialogs._activeDictation is None,
+			"Alt+F4: speech mode back to talk, no dictation left", repr(speech.getState().speechMode))
+		check = time.monotonic()
+		ui.message("speech check after Alt+F4")
+		yield 800
+		dump("alt+f4", start)
+		report(mutedAt is not None and not entries(mutedAt, restoredAt), "Alt+F4: synthesizer got nothing while dictating")
+		report([text for t, text in entries(check)] == ["speech check after Alt plus F 4"], "Alt+F4: the synthesizer speaks again",
+			repr(entries(check)))
+		speech.setSpeechMode = originalSetMode
+		speech.speakTypedCharacters = originalTyped
+
 	def _run(self):
 		info("NVDA %s, Python %s, %d-bit, configPath=%s" % (
 			buildVersion.version, sys.version.split()[0], 64 if sys.maxsize > 2 ** 32 else 32,
@@ -1275,6 +1492,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		command = codexClient.buildCommand(FAKE_CODEX, ["login", "status"])
 		report(isinstance(command, str) and "cmd.exe\" /d /v:off /s /c" in command,
 			"fake codex.cmd is not an npm shim, so the cmd.exe fallback is used", repr(command))
+
+		if only == "dictation":
+			yield from self._dictationRecorder(dialogs)
+			self._exit()
+			return
 
 		# ASKAI_SMOKE_ONLY=new: skip the Ask GPT 1.1 steps (2 to 8) and go straight to the Claude steps, then the
 		# settings and the exit checks. Fewer child processes before the new features are reached, because Wine 10's

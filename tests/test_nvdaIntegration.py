@@ -1506,5 +1506,34 @@ class TestMnemonics(unittest.TestCase):
 		self.assertEqual(sorted(used), sorted("svhcradxi"), letters)
 
 
+class TestSpeakThenFallback(FakeNvdaTestCase):
+	"""In beeps / on-demand / off the synthesizer never gets the message, so speakThen must not wait for
+	the estimated speech time before e.g. starting voice typing (it did: about 5 s in on-demand mode).
+	"""
+
+	def _withMode(self, modeName):
+		import enum
+		import types
+
+		SpeechMode = enum.Enum("SpeechMode", "off beeps talk onDemand")
+		fakeSpeech = types.ModuleType("speech")
+		fakeSpeech.SpeechMode = SpeechMode
+		fakeSpeech.getState = lambda: types.SimpleNamespace(speechMode=SpeechMode[modeName])
+		saved = sys.modules.get("speech")
+		sys.modules["speech"] = fakeSpeech
+		self.addCleanup(lambda: sys.modules.__setitem__("speech", saved) if saved else sys.modules.pop("speech", None))
+
+	def test_talkModeWaitsForEstimatedSpeech(self):
+		self._withMode("talk")
+		message = "Voice typing. Speak your question, then press Enter to send."
+		self.assertEqual(self.dialogs.fallbackDelayMs(message), self.dialogs.estimatedSpeechMs(message))
+
+	def test_otherModesUseShortDelay(self):
+		for mode in ("beeps", "onDemand", "off"):
+			with self.subTest(mode=mode):
+				self._withMode(mode)
+				self.assertEqual(self.dialogs.fallbackDelayMs("x" * 200), self.dialogs.NON_TALK_DELAY_MS)
+
+
 if __name__ == "__main__":
 	unittest.main()
