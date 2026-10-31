@@ -1,0 +1,72 @@
+Ask GPT for NVDA - tester guide
+================================
+
+Thank you for testing. Ask GPT lets you ask ChatGPT a question from anywhere
+with NVDA+Alt+G and hear the answer. It uses your own ChatGPT subscription
+through OpenAI's official Codex program, so there is no API key and no
+per-question charge. Questions count toward your ChatGPT plan's usage.
+
+What you need
+-------------
+- Windows 10 or 11
+- NVDA 2024.1 or later
+- Your own ChatGPT account with a paid plan (Plus, Pro, Team or Business)
+- An internet connection
+
+Step 1: Install Node.js and the Codex program (one time)
+--------------------------------------------------------
+1. Press Windows+R, type cmd, and press Enter to open a command prompt.
+2. Type this and press Enter, then wait until it finishes:
+   winget install OpenJS.NodeJS.LTS
+3. Close the command prompt and open a new one (so it sees Node.js).
+4. Type this and press Enter, then wait until it finishes:
+   npm install -g @openai/codex
+5. To check it worked, type this and press Enter:
+   codex --version
+   You should hear a version number. Then close the command prompt.
+
+Step 2: Install the add-on
+--------------------------
+1. Press Enter on the file askGPT-1.0.0.nvda-addon.
+2. NVDA asks whether you want to install it. This add-on is not from the
+   NVDA Add-on Store, so NVDA may warn about that. Choose Yes / Install.
+3. Restart NVDA when it asks.
+
+Step 3: Sign in with your ChatGPT account
+-----------------------------------------
+1. Press NVDA+N, then P for Preferences, then S for Settings.
+2. In the Categories list, go to "Ask GPT" and press Tab.
+3. Press the "Sign in with ChatGPT" button (Alt+S).
+4. Your web browser opens. Sign in with your ChatGPT account and approve.
+5. Go back to NVDA Settings (Alt+Tab until you hear it). NVDA tells you when
+   you are signed in. Press OK.
+If the browser does not open, use the "Copy sign-in link" button (Alt+Y) and
+paste the link into your browser's address bar.
+
+Step 4: Ask a question
+----------------------
+- Press NVDA+Alt+G. Type a question and press Enter.
+- You hear soft beeps while it works, then NVDA reads the answer.
+- To speak instead of typing, press Alt+D (Dictate). Windows voice typing
+  starts. Speak your question, then press Enter.
+- Answers are also in the Conversation box (Alt+V); use the arrow keys to
+  review them.
+- NVDA+Alt+Shift+G repeats the last answer from anywhere. Press it twice to
+  open the answer in a window you can read.
+- Escape cancels a question that is still waiting; press it again to close.
+
+What to report back
+-------------------
+Please send back answers to these, even if everything worked:
+1. Your Windows version and NVDA version (NVDA menu, Help, About).
+2. Did the sign-in work? Did NVDA tell you that you were signed in?
+3. Did NVDA read the label of every control in the Ask GPT settings page?
+   In particular, does the "Model" box say its name when you Tab to it?
+4. Did asking a typed question work, and how long did the answer take?
+5. Did Dictate (Windows voice typing) work?
+6. Anything confusing, silent, or spoken twice.
+If something goes wrong, open the NVDA menu, Tools, View log, and send the
+lines that mention askGPT (or the whole log).
+
+To remove the add-on: NVDA menu, Tools, Add-on store, Installed add-ons,
+select Ask GPT, and choose Remove.
