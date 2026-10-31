@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: keep NVDA quiet while Windows voice typing types into the Question box,
+# Ask AI NVDA add-on: keep NVDA quiet while Windows voice typing types into the Question box,
 # then restore the user's exact speech mode. No NVDA imports: the speech module is passed in,
 # so the state machine can be tested with a fake.
 #

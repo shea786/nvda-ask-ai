@@ -107,11 +107,11 @@ class TestConversation(unittest.TestCase):
 	def test_defaultFolder(self):
 		self.assertEqual(
 			conversations.defaultConversationsDir({"LOCALAPPDATA": "/lad"}, isWindows=True),
-			os.path.join("/lad", "askGPT", "conversations"),
+			os.path.join("/lad", "askAI", "conversations"),
 		)
 		self.assertEqual(
 			conversations.defaultConversationsDir({}, isWindows=False),
-			os.path.join(tempfile.gettempdir(), "askGPT-conversations"),
+			os.path.join(tempfile.gettempdir(), "askAI-conversations"),
 		)
 
 
@@ -134,7 +134,7 @@ class TestStore(unittest.TestCase):
 		loaded = self.store.load(conversation.id)
 		self.assertEqual(loaded.toDict(), conversation.toDict())
 		with open(os.path.join(self.folder, conversation.id + ".json"), encoding="utf-8") as f:
-			self.assertEqual(json.load(f)["schemaVersion"], 1)
+			self.assertEqual(json.load(f)["schemaVersion"], 2)
 		self.assertIsNone(self.store.load("f" * 32))
 		self.assertIsNone(self.store.load("../../etc/passwd"))
 

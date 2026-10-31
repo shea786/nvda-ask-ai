@@ -8,8 +8,8 @@ import unittest
 
 import helpers  # noqa: F401  (adds the add-on package to sys.path)
 
-import modelCatalog
-from modelCatalog import ModelInfo
+from providers import modelCatalog
+from providers.modelCatalog import ModelInfo
 
 # Shaped like ~/.codex/models_cache.json from codex-cli 0.160.0 (extra fields trimmed).
 CACHE = {

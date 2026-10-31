@@ -1,0 +1,70 @@
+name: Release
+
+# Builds and publishes a GitHub release when a version tag is pushed, for example v1.2.0 or v1.2.0-beta1.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run the tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Check that the tag matches the manifest version
+        id: version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          MANIFEST_VERSION="$(python - <<'EOF'
+          import configparser
+          parser = configparser.ConfigParser(interpolation=None)
+          with open("addon/manifest.ini", encoding="utf-8") as f:
+              parser.read_string("[manifest]\n" + f.read())
+          print(parser["manifest"]["version"].strip().strip('"'))
+          EOF
+          )"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME (version $TAG_VERSION) does not match version $MANIFEST_VERSION in addon/manifest.ini. Bump the manifest or fix the tag."
+            exit 1
+          fi
+          echo "version=$MANIFEST_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build the add-on
+        run: python build.py
+
+      - name: Checksums and release files
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ADDON="askAI-${VERSION}.nvda-addon"
+          if [ ! -f "$ADDON" ]; then
+            echo "::error::build.py did not produce $ADDON"
+            exit 1
+          fi
+          sha256sum "$ADDON" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          cp tester/TESTING.txt TESTING.txt
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ADDON="askAI-${VERSION}.nvda-addon"
+          PRERELEASE=""
+          case "$GITHUB_REF_NAME" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" "$ADDON" SHA256SUMS.txt TESTING.txt \
+            --title "Ask AI ${VERSION}" --generate-notes $PRERELEASE

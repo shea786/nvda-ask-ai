@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: the conversation manager (continue, rename, archive, delete, export, import).
+# Ask AI NVDA add-on: the conversation manager (continue, rename, archive, delete, export, import).
 
 import os
 
@@ -11,7 +11,7 @@ from gui import guiHelper
 from gui.dpiScalingHelper import DpiScalingHelperMixinWithoutInit
 from logHandler import log
 
-from . import conversations, dialogs, exporters
+from . import conversations, dialogs, exporters, providers
 from .textUtils import stripMarkdown
 
 addonHandler.initTranslation()
@@ -29,7 +29,8 @@ def conversationBlocks(conversation, raw=False):
 			blocks.append(("heading", _("You")))
 			blocks.append(("text", text))
 		elif role == conversations.ROLE_ASSISTANT:
-			blocks.append(("heading", "GPT"))
+			# The service that wrote the answer ("ChatGPT", "Claude"): a product name, not translated.
+			blocks.append(("heading", providers.shortName(message.get("provider") or conversation.provider)))
 			blocks.append(("text", text if raw else (stripMarkdown(text) or text)))
 		elif role == conversations.ROLE_ERROR:
 			# Translators: Heading for an error in an exported conversation.
@@ -45,7 +46,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 
 	def __init__(self, parent):
 		# Translators: Title of the conversation manager.
-		super().__init__(parent, title=_("Ask GPT conversations"), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
+		super().__init__(parent, title=_("Ask AI conversations"), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
 		self.chosen = None
 		self._items = []
 		mainSizer = wx.BoxSizer(wx.VERTICAL)
@@ -56,7 +57,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			_("Con&versations:"),
 			wx.ListCtrl,
 			style=wx.LC_REPORT | wx.LC_SINGLE_SEL,
-			size=self.scaleSize((620, 260)),
+			size=self.scaleSize((710, 260)),
 		)
 		for column, (label, width) in enumerate(
 			(
@@ -68,6 +69,8 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 				(_("Messages"), 80),
 				# Translators: Column in the conversation list: the project folder name.
 				(_("Project"), 120),
+				# Translators: Column in the conversation list: the AI service, e.g. "ChatGPT" or "Claude".
+				(_("Service"), 90),
 			),
 		):
 			self.listCtrl.InsertColumn(column, label, width=self.scaleSize(width))
@@ -86,7 +89,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self.archivedCheck.Bind(wx.EVT_CHECKBOX, lambda evt: self.populate(self._selectedId()))
 
 		actionButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
-		# Translators: Button that continues the selected conversation in the Ask GPT dialog.
+		# Translators: Button that continues the selected conversation in the Ask AI dialog.
 		self.continueButton = actionButtons.addButton(self, label=_("&Continue"))
 		self.continueButton.SetDefault()
 		self.continueButton.Bind(wx.EVT_BUTTON, self.onContinue)
@@ -173,6 +176,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			self.listCtrl.SetItem(index, 2, str(conversation.turnCount))
 			folder = conversation.projectFolder
 			self.listCtrl.SetItem(index, 3, os.path.basename(os.path.normpath(folder)) if folder else "")
+			self.listCtrl.SetItem(index, 4, providers.shortName(conversation.provider))
 		self.emptyText.Show(not self._items)
 		self.Layout()
 		if self._items:
@@ -208,7 +212,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			self.archiveButton.SetLabel(_("&Archive"))
 
 	def _refreshAskDialog(self):
-		dialog = dialogs.AskGPTDialog.getInstance()
+		dialog = dialogs.AskAIDialog.getInstance()
 		if dialog is not None:
 			dialog.loadConversation()
 
@@ -285,7 +289,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		index = self._selectedIndex()
 		title = conversation.title or _("Untitled conversation")
 		# Translators: Confirmation before permanently deleting a conversation. {title} is its title.
-		if not dialogs.askYesNo(_("Permanently delete the conversation {title}?").format(title=title), _("Ask GPT"), self):
+		if not dialogs.askYesNo(_("Permanently delete the conversation {title}?").format(title=title), _("Ask AI"), self):
 			return
 		state = dialogs.state
 		if state.pending is not None and state.pending.conversationId == conversation.id:
@@ -293,7 +297,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		try:
 			self.store.delete(conversation.id)
 		except OSError as e:
-			log.error("Ask GPT: could not delete a conversation", exc_info=True)
+			log.error("Ask AI: could not delete a conversation", exc_info=True)
 			# Translators: Error when a conversation file could not be deleted. {error} is the reason.
 			dialogs.showError(_("The conversation could not be deleted: {error}").format(error=e), self)
 			return
@@ -332,7 +336,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			# Translators: Title of the file chooser for importing a conversation.
 			_("Import a conversation"),
 			# Translators: File type filter for conversation files.
-			wildcard=_("Ask GPT conversations (*.json)|*.json|All files (*.*)|*.*"),
+			wildcard=_("Ask AI conversations (*.json)|*.json|All files (*.*)|*.*"),
 			style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
 		) as fileDialog:
 			if fileDialog.ShowModal() != wx.ID_OK:
@@ -341,9 +345,9 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		try:
 			conversation = self.store.importFile(path)
 		except (OSError, ValueError) as e:
-			log.debugWarning("Ask GPT: import failed: %s" % e)
-			# Translators: Error when a file is not an Ask GPT conversation. {error} is the reason.
-			dialogs.showError(_("This file is not an Ask GPT conversation: {error}").format(error=e), self)
+			log.debugWarning("Ask AI: import failed: %s" % e)
+			# Translators: Error when a file is not an Ask AI conversation. {error} is the reason.
+			dialogs.showError(_("This file is not an Ask AI conversation: {error}").format(error=e), self)
 			return
 		self.archivedCheck.SetValue(False)
 		self.populate(conversation.id)
@@ -363,7 +367,7 @@ def showConversationManager(parent):
 	if result != wx.ID_OK or chosen is None:
 		return
 	dialogs.switchConversation(chosen)
-	askDialog = dialogs.AskGPTDialog.getInstance()
+	askDialog = dialogs.AskAIDialog.getInstance()
 	if askDialog is None:
 		dialogs.openAskDialog()
 	else:
@@ -374,6 +378,6 @@ def showConversationManager(parent):
 		ui.message,
 		_("Continuing {title}").format(title=chosen.title or _("Untitled conversation")),
 	)
-	askDialog = dialogs.AskGPTDialog.getInstance()
+	askDialog = dialogs.AskAIDialog.getInstance()
 	if askDialog is not None:
 		askDialog.questionCtrl.SetFocus()

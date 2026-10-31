@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: notice files that GPT created or changed in the project folder.
+# Ask AI NVDA add-on: notice files that the AI created or changed in the project folder.
 # Pure standard library, no NVDA imports.
 
 import os

@@ -60,13 +60,13 @@ class TestWriting(unittest.TestCase):
 			self.assertIn("one", f.read())
 
 	def test_createsFolder(self):
-		target = os.path.join(self.folder, "Documents", "Ask GPT")
+		target = os.path.join(self.folder, "Documents", "Ask AI")
 		path = exporters.export(target, "x", exporters.FORMAT_MD, "T", [("text", "plain")], [("text", "**raw**")])
 		with open(path, encoding="utf-8") as f:
 			self.assertIn("**raw**", f.read(), "Markdown keeps the raw answer")
 
 	def test_defaultFolder(self):
-		self.assertEqual(exporters.defaultSaveFolder(os.path.join("C", "Docs")), os.path.join("C", "Docs", "Ask GPT"))
+		self.assertEqual(exporters.defaultSaveFolder(os.path.join("C", "Docs")), os.path.join("C", "Docs", "Ask AI"))
 
 
 class TestFormats(unittest.TestCase):

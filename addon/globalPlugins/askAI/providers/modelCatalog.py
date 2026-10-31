@@ -1,5 +1,6 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: the list of models Codex offers, read from Codex's own cache file.
+# Ask AI NVDA add-on: model lists. ModelInfo and the chooser helpers are shared by all services;
+# loadModels() reads the list Codex offers from Codex's own cache file.
 # Pure standard library, no NVDA imports.
 #
 # Codex keeps %CODEX_HOME%\models_cache.json (default %USERPROFILE%\.codex). Observed with codex-cli 0.160.0:
@@ -112,30 +113,33 @@ def findModel(models, slug):
 	return None
 
 
-def modelChoices(models, extraSlugs=()):
+def modelChoices(models, extraSlugs=(), efforts=DEFAULT_EFFORTS):
 	"""ModelInfo list for a model chooser: cached models, then any configured slug that is not cached.
 	The "Default" entry is added by the UI.
 	"""
 	result = list(models)
 	for slug in extraSlugs:
 		if slug and not findModel(result, slug):
-			result.append(ModelInfo(slug))
+			result.append(ModelInfo(slug, efforts=efforts))
 	return result
 
 
-def effortsFor(models, slug):
+def effortsFor(models, slug, fallback=DEFAULT_EFFORTS):
+	"""The model's effort levels; fallback (the service's levels) for the default or an unknown model."""
 	model = findModel(models, slug) if slug else None
-	return model.efforts if model else DEFAULT_EFFORTS
+	return model.efforts if model else tuple(fallback)
 
 
-def pickEffort(models, slug, wanted):
+def pickEffort(models, slug, wanted, fallback=DEFAULT_EFFORTS):
 	"""wanted if the model supports it, else the model's default, else the first level."""
-	efforts = effortsFor(models, slug)
+	efforts = effortsFor(models, slug, fallback)
 	if wanted in efforts:
 		return wanted
 	model = findModel(models, slug) if slug else None
 	if model is not None:
 		return model.defaultEffort
+	if "low" in efforts:
+		return "low"
 	return efforts[0]
 
 
@@ -150,7 +154,7 @@ def comboLabel(model):
 
 
 def slugFromComboText(text, models):
-	"""Inverse of comboLabel; also accepts a typed slug or display name. "" means Codex's default."""
+	"""Inverse of comboLabel; also accepts a typed slug or display name. "" means the service's default."""
 	text = (text or "").strip()
 	if not text:
 		return ""

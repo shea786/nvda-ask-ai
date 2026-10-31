@@ -1,20 +1,24 @@
-Ask GPT for NVDA - tester guide
-================================
+Ask AI for NVDA - tester guide (version 1.2.0)
+===============================================
 
-Thank you for testing. Ask GPT lets you ask ChatGPT a question from anywhere
-with NVDA+Alt+G and hear the answer. It uses your own ChatGPT subscription
-through OpenAI's official Codex program, so there is no API key and no
-per-question charge. Questions count toward your ChatGPT plan's usage.
+Thank you for testing. Ask AI (called Ask GPT up to version 1.1) lets you
+ask ChatGPT or Claude a question from anywhere with NVDA+Alt+G and hear the
+answer. It uses your own subscription through each company's official
+program: OpenAI's Codex for ChatGPT, Anthropic's Claude Code for Claude.
+There is no API key and no per-question charge; questions count toward
+your plan's usage. You only need one of the two services, but please test
+both if you can.
 
 What you need
 -------------
 - Windows 10 or 11
 - NVDA 2024.1 or later
-- Your own ChatGPT account with a paid plan (Plus, Pro, Team or Business)
+- A paid ChatGPT plan (Plus, Pro, Team or Business), and/or
+  a paid Claude plan (Pro, Max, Team or Enterprise)
 - An internet connection
 
-Step 1: Install Node.js and the Codex program (one time)
---------------------------------------------------------
+Step 1a: ChatGPT - install Node.js and Codex (one time)
+-------------------------------------------------------
 1. Press Windows+R, type cmd, and press Enter to open a command prompt.
 2. Type this and press Enter, then wait until it finishes:
    winget install OpenJS.NodeJS.LTS
@@ -25,80 +29,108 @@ Step 1: Install Node.js and the Codex program (one time)
    codex --version
    You should hear a version number. Then close the command prompt.
 
+Step 1b: Claude - install Claude Code (one time)
+------------------------------------------------
+1. Press Windows+R, type powershell, and press Enter.
+2. Type this and press Enter, then wait until the prompt comes back
+   (it shows no progress while downloading):
+   irm https://claude.ai/install.ps1 | iex
+3. Open a new command prompt and type:
+   claude --version
+   You should hear something like "2.1.314 (Claude Code)". Ask AI needs
+   2.1.259 or later; "claude update" updates it.
+
 Step 2: Install the add-on
 --------------------------
-1. Press Enter on the file askGPT-1.1.0.nvda-addon.
-2. NVDA asks whether you want to install it. This add-on is not from the
-   NVDA Add-on Store, so NVDA may warn about that. Choose Yes / Install.
+1. Press Enter on the file askAI-1.2.0.nvda-addon.
+2. NVDA asks whether you want to install it. If it did not come from the
+   NVDA Add-on Store, NVDA may warn about that. Choose Yes / Install.
 3. Restart NVDA when it asks.
+4. If you had Ask GPT installed: your settings and conversations are
+   copied over. About 8 seconds after NVDA starts, Ask AI asks "The old
+   Ask GPT add-on is still installed. Remove it now?". Choose Yes and
+   restart NVDA again. (It asks only once.)
 
-Step 3: Sign in with your ChatGPT account
------------------------------------------
+Step 3: Sign in
+---------------
 1. Press NVDA+N, then P for Preferences, then S for Settings.
-2. In the Categories list, go to "Ask GPT" and press Tab.
-3. Press the "Sign in with ChatGPT" button (Alt+S).
-4. Your web browser opens. Sign in with your ChatGPT account and approve.
-5. Go back to NVDA Settings (Alt+Tab until you hear it). NVDA tells you when
-   you are signed in. Press OK.
-If the browser does not open, use the "Copy sign-in link" button (Alt+Y) and
-paste the link into your browser's address bar.
+2. In the Categories list, go to "Ask AI" and press Tab.
+3. "Default AI service" (Alt+V) is the service new conversations use.
+   "Account settings for" (Alt+G) chooses which service the next controls
+   belong to: pick ChatGPT (Codex) or Claude (Claude Code).
+4. Press "Sign in to ChatGPT" or "Sign in to Claude" (Alt+S).
+5. Your web browser opens. Sign in and approve.
+6. Go back to NVDA Settings (Alt+Tab until you hear it). NVDA tells you
+   when you are signed in. Repeat steps 3 to 6 for the other service if
+   you have both. Press OK.
+If the browser does not open, use "Copy sign-in link" (Alt+Y) and paste
+the link into your browser's address bar. For Claude the page then shows
+a code: copy it, come back and press "Enter sign-in code" (the button
+right after Copy sign-in link), paste it and press Enter.
 
 Step 4: Ask a question
 ----------------------
 - Press NVDA+Alt+G. Type a question and press Enter.
 - You hear soft beeps while it works, then NVDA reads the answer.
+- AI service (Alt+S) switches this conversation between ChatGPT and
+  Claude; NVDA says "Now using Claude". Model (Alt+M) and Reasoning
+  effort (Alt+E) follow the service.
 - To speak instead of typing, press Alt+D (Dictate). Windows voice typing
   starts. Speak your question, then press Enter.
-- Answers are also in the Conversation box (Alt+V); use the arrow keys to
-  review them.
+- Answers are also in the Conversation box (Alt+V), after "ChatGPT:" or
+  "Claude:"; use the arrow keys to review them.
 - NVDA+Alt+Shift+G repeats the last answer from anywhere. Press it twice to
   open the answer in a window you can read.
 - Escape cancels a question that is still waiting; press it again to close.
 
-New in version 1.1.0
---------------------
-- Quiet dictation: after Alt+D, NVDA goes silent while Windows voice typing
-  types your words, then says "Dictation finished" and reads what was typed.
-  Speech comes back when you press Enter, Escape or Alt+D again, leave the
-  Question box, or stop speaking for a few seconds (setting: "Dictation
-  silence timeout"). Your speech mode (talk, beeps, on-demand) is kept.
-- Conversations are saved. NVDA+Alt+G continues your last conversation, even
-  after restarting NVDA. Alt+N starts a new one (the old one stays saved).
-- Conversations button (Alt+R), or NVDA menu, Tools, "Ask GPT conversations":
-  a list where you can Continue (Enter), Rename, Archive, Delete, Export
-  (Word, PDF, text...) and Import conversations. They are stored in
-  %LOCALAPPDATA%\askGPT\conversations unless you choose another folder in
-  the settings (for example OneDrive, to use them on another PC).
-- Save answer as (Alt+S): saves the last answer as Word, PDF, text, web page
-  or Markdown, in the project folder or in Documents\Ask GPT.
-- Project folder (Alt+F to choose, Alt+J to read it): GPT can read that
-  folder and, unless you turn it off in the settings, create files there,
-  e.g. "write a cover letter as a Word document". NVDA says "Created: ...".
-  Codex runs in its sandbox (only that folder, no internet while working),
-  but please use a test folder or one with a backup.
-- Model (Alt+M) and Reasoning effort (Alt+E) can be changed per
-  conversation; the list comes from Codex itself.
+Other features
+--------------
+- Quiet dictation: NVDA goes silent while Windows voice typing types your
+  words, then says "Dictation finished" and reads what was typed.
+- Conversations are saved, with their service. NVDA+Alt+G continues your
+  last conversation, even after restarting NVDA. Alt+N starts a new one.
+- Conversations button (Alt+R), or NVDA menu, Tools, "Ask AI
+  conversations": Continue, Rename, Archive, Delete, Export and Import.
+  The list has a Service column. Files are in
+  %LOCALAPPDATA%\askAI\conversations unless you choose another folder.
+- Save answer as (Alt+W): Word, PDF, text, web page or Markdown, in the
+  project folder or in Documents\Ask AI.
+- Project folder (Alt+F to choose, Alt+J to read it): the AI can read that
+  folder and, unless you turn it off in the settings, create files there.
+  ChatGPT (Codex) works in Codex's sandbox and can make Word files.
+  Claude can only use file tools inside the folder (no commands, no web),
+  so it makes text files such as Markdown or HTML; use Save answer as for
+  Word or PDF. Please use a test folder or one with a backup.
+- Updates: NVDA menu, Tools, "Check for Ask AI updates", or the "Check for
+  updates now" button (Alt+U) in the settings. Without a newer version it
+  says "Ask AI 1.2.0 is the latest version."
 
 What to report back
 -------------------
 Please send back answers to these, even if everything worked:
 1. Your Windows version and NVDA version (NVDA menu, Help, About).
-2. Did the sign-in work? Did NVDA tell you that you were signed in?
-3. Did NVDA read the label of every control in the Ask GPT settings page?
-   In particular, does the "Model" box say its name when you Tab to it?
-4. Did asking a typed question work, and how long did the answer take?
-5. Did Dictate (Windows voice typing) work? Did NVDA stay quiet while you
+2. Which services you tested (ChatGPT, Claude or both) and your plans.
+3. Did the sign-in work for each? Did NVDA tell you that you were signed
+   in? For Claude, did you need the sign-in code?
+4. Did NVDA read the label of every control in the Ask AI settings page,
+   including after switching "Account settings for"?
+5. Did asking a typed question work with each service, and how long did
+   the answers take? Did "Now using Claude" / "Now using ChatGPT" work?
+6. Did Dictate (Windows voice typing) work? Did NVDA stay quiet while you
    spoke, and did it speak again afterwards (and read what you dictated)?
    If NVDA ever stayed silent, press NVDA+S to change speech mode and tell us.
-6. Did your conversation come back after restarting NVDA? Did the
-   conversation manager list, rename, archive and delete work?
-7. Did "Save answer as" make a Word and a PDF file you could open?
-8. With a project folder: did GPT create the file you asked for, and did
-   NVDA tell you its name? Which Windows version (e.g. 11 24H2) do you have?
-9. Did the Model list show models, and did changing it work?
-10. Anything confusing, silent, or spoken twice.
+7. If you had Ask GPT: were your settings and conversations there, and did
+   the question about removing Ask GPT appear once?
+8. Did your conversations come back after restarting NVDA? Did the
+   conversation manager show the right service for each?
+9. Did "Save answer as" make a Word and a PDF file you could open?
+10. With a project folder: did the AI create the file you asked for, and did
+    NVDA tell you its name? Which Windows version (e.g. 11 24H2) do you have?
+11. Did a usage limit or sign-in problem give a clear message naming the
+    right service?
+12. Anything confusing, silent, or spoken twice.
 If something goes wrong, open the NVDA menu, Tools, View log, and send the
-lines that mention askGPT (or the whole log).
+lines that mention Ask AI (or the whole log).
 
 To remove the add-on: NVDA menu, Tools, Add-on store, Installed add-ons,
-select Ask GPT, and choose Remove.
+select Ask AI, and choose Remove.

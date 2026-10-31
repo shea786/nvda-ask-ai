@@ -7,7 +7,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PACKAGE_DIR = os.path.join(ROOT, "addon", "globalPlugins", "askGPT")
+PACKAGE_DIR = os.path.join(ROOT, "addon", "globalPlugins", "askAI")
 if PACKAGE_DIR not in sys.path:
 	sys.path.insert(0, PACKAGE_DIR)
 
@@ -76,7 +76,7 @@ class FakePopen:
 
 
 class FakeJob:
-	"""Stands in for codexClient.WindowsJob."""
+	"""Stands in for providers.base.WindowsJob."""
 
 	instances = []
 

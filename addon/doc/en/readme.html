@@ -2,18 +2,24 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Ask GPT NVDA add-on</title>
+<title>Ask AI NVDA add-on</title>
 </head>
 <body>
-<h1>Ask GPT NVDA add-on (version 1.1.0)</h1>
-<p>Ask ChatGPT a question from anywhere in Windows, by typing or by voice, and hear the answer read by NVDA.
-The add-on uses the official OpenAI Codex command line program, signed in with your ChatGPT account.
-Usage counts toward your ChatGPT plan (Plus, Pro, Team or Business). No API key is needed and there is no pay-per-use billing.</p>
-<p>New in 1.1.0: NVDA stays quiet while you dictate, conversations are saved and can be continued later,
-each conversation can have a project folder where GPT can create files, answers can be saved as Word, PDF and other files,
-and you can choose the model for each conversation.</p>
+<h1>Ask AI NVDA add-on (version 1.2.0)</h1>
+<p>Ask ChatGPT or Claude a question from anywhere in Windows, by typing or by voice, and hear the answer read by NVDA.
+The add-on uses the official command line program of each service, signed in with your own subscription:</p>
+<ul>
+<li><strong>ChatGPT</strong> through OpenAI's Codex program, signed in with your ChatGPT plan (Plus, Pro, Team or Business).</li>
+<li><strong>Claude</strong> through Anthropic's Claude Code program, signed in with your Claude plan (Pro, Max, Team or Enterprise).</li>
+</ul>
+<p>Usage counts toward your plan. No API key is needed and there is no pay-per-use billing. You need only one of the two services,
+but you can use both and choose per conversation.</p>
+<p>New in 1.2.0: the add-on was called Ask GPT and is now <strong>Ask AI</strong>. Claude is available as a second service.
+Your Ask GPT settings and conversations are copied over automatically, and Ask AI offers once to remove the old Ask GPT add-on
+(both would answer NVDA+Alt+G); restart NVDA afterwards. The add-on can also check for updates itself.</p>
+<p>Ask AI is free software under the GNU General Public License version 2 (see copying.txt in the add-on folder).</p>
 
-<h2>One-time setup</h2>
+<h2>One-time setup for ChatGPT (Codex)</h2>
 <ol>
 <li>Install Node.js (the LTS version) from <a href="https://nodejs.org/">nodejs.org</a> and accept the defaults in the installer.
 Or open a command prompt and type <code>winget install OpenJS.NodeJS.LTS</code>, then press Enter.</li>
@@ -25,41 +31,67 @@ If you hear "not recognized" instead, close the command prompt, open a new one a
 Then type <code>exit</code> and press Enter.
 Alternatively, download the Windows codex program from <a href="https://github.com/openai/codex/releases">github.com/openai/codex/releases</a>
 and set its path in the add-on settings.</li>
-<li>Install this add-on (open the <code>askGPT-1.1.0.nvda-addon</code> file), and restart NVDA when asked.</li>
-<li>Open the NVDA menu (NVDA+N), then choose Preferences, then Settings, and select the <strong>Ask GPT</strong> category.</li>
-<li>Press <strong>Sign in with ChatGPT</strong>. NVDA says "Your browser will open. Sign in with your ChatGPT account,
-then come back to NVDA. NVDA will tell you when you are signed in." Your web browser then opens the ChatGPT sign-in page.
+</ol>
+
+<h2>One-time setup for Claude (Claude Code)</h2>
+<ol>
+<li>Open PowerShell: press Windows+R, type <code>powershell</code> and press Enter.</li>
+<li>Type <code>irm https://claude.ai/install.ps1 | iex</code> and press Enter. The installer shows no progress while it downloads; wait until the prompt returns.
+If you prefer, install it in a command prompt with <code>npm install -g @anthropic-ai/claude-code</code> (needs Node.js 22 or later)
+or <code>winget install Anthropic.ClaudeCode</code>.</li>
+<li>Open a new command prompt and type <code>claude --version</code>. You should hear a version number such as "2.1.314 (Claude Code)".
+Ask AI needs Claude Code 2.1.259 or later; <code>claude update</code> updates it.</li>
+</ol>
+<p>The add-on finds Claude Code in <code>%USERPROFILE%\.local\bin\claude.exe</code> (the installer above),
+<code>%APPDATA%\npm\claude.cmd</code> (npm) or on the PATH. Git for Windows is not needed, because the add-on never lets Claude run commands.</p>
+
+<h2>Install and sign in</h2>
+<ol>
+<li>Install this add-on (open the <code>askAI-1.2.0.nvda-addon</code> file), and restart NVDA when asked.</li>
+<li>Open the NVDA menu (NVDA+N), then choose Preferences, then Settings, and select the <strong>Ask AI</strong> category.</li>
+<li>In <strong>Account settings for</strong> (Alt+G), choose ChatGPT (Codex) or Claude (Claude Code). The controls below it then belong to that service.</li>
+<li>Press <strong>Sign in to ChatGPT</strong> or <strong>Sign in to Claude</strong> (Alt+S). NVDA says "Your browser will open. Sign in with your
+ChatGPT account (or Claude account), then come back to NVDA. NVDA will tell you when you are signed in." Your web browser then opens the sign-in page.
 Sign in as usual. The page may ask for a verification code sent by e-mail or text message, a two-factor authentication code,
 or a "verify you are human" check (CAPTCHA). If a CAPTCHA is hard to solve with NVDA, try its audio option, or ask a sighted helper for this one step.</li>
 <li>When the browser says you are signed in, go back to NVDA: press Alt+Tab repeatedly until you hear "NVDA Settings".
-NVDA announces "Signed in with ChatGPT" by itself. You can also press <strong>Check status</strong>.
-If you do not finish within about 3 minutes, NVDA says "Sign-in was not completed. Press Sign in to try again."</li>
+NVDA announces "Signed in with ChatGPT" or "Signed in with Claude" by itself. You can also press <strong>Check status</strong>.
+If you do not finish within about 5 minutes, NVDA says "Sign-in was not completed. Press Sign in to try again."</li>
+<li>To use both services, choose the other one in Account settings for and sign in again.
+<strong>Default AI service</strong> (Alt+V) decides which service new conversations use.</li>
 <li>Press OK to close the settings.</li>
 </ol>
-<p><strong>If the browser did not open</strong>: press <strong>Copy sign-in link</strong> (Alt+Y) in the Ask GPT settings
+<p><strong>If the browser did not open</strong>: press <strong>Copy sign-in link</strong> (Alt+Y) in the Ask AI settings
 right after pressing Sign in, then open your browser, press Alt+D or Control+L to move to the address bar, paste with Control+V and press Enter.
-You can also open a command prompt and type <code>codex login</code>.</p>
+For ChatGPT that is all. For Claude, the page shows a code at the end: copy it, go back to NVDA Settings and press
+<strong>Enter sign-in code</strong> (right after Copy sign-in link), paste the code and press Enter.
+You can also open a command prompt and type <code>codex login</code> or <code>claude auth login</code>.</p>
+<p>If the Status says <strong>Signed in with an API key, which is billed per use</strong>, the program is signed in to a pay-per-use API account
+instead of your subscription: press Sign out, then sign in again. Ask AI never passes API keys from environment variables
+(OPENAI_API_KEY, CODEX_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN) to the programs, so they cannot switch you to API billing.</p>
 
 <h2>Asking a question</h2>
 <ol>
-<li>Press <strong>NVDA+Alt+G</strong> from anywhere, or choose NVDA menu, Tools, Ask GPT. The Ask GPT dialog opens with the cursor in the Question box.
+<li>Press <strong>NVDA+Alt+G</strong> from anywhere, or choose NVDA menu, Tools, Ask AI. The Ask AI dialog opens with the cursor in the Question box.
 It continues your most recent conversation, even after restarting NVDA. The window title says which conversation it is.</li>
 <li>Type your question and press <strong>Enter</strong> to send it. To start a new line inside the question instead, press Shift+Enter.</li>
-<li>NVDA says "Asking GPT" and plays a soft beep every two seconds while waiting (you can turn the beep off in the settings). Answers usually take 5 to 30 seconds.</li>
-<li>When the answer arrives, NVDA reads it. It is also added to the Conversation box.</li>
-<li>Type a follow-up question and press Enter. GPT remembers the earlier questions of this conversation.</li>
+<li>NVDA says "Asking ChatGPT" or "Asking Claude" and plays a soft beep every two seconds while waiting (you can turn the beep off in the settings).
+Answers usually take 5 to 30 seconds.</li>
+<li>When the answer arrives, NVDA reads it. It is also added to the Conversation box, after "ChatGPT:" or "Claude:".</li>
+<li>Type a follow-up question and press Enter. The AI remembers the earlier questions of this conversation.</li>
 </ol>
 <p>While waiting, press <strong>Escape</strong> (or the Cancel button, Alt+C) to cancel the question. When nothing is pending, Escape closes the dialog.
-If you close the dialog with the Close button while GPT is still working, the question keeps running, and NVDA speaks the answer when it is ready.
+If you close the dialog with the Close button while the AI is still working, the question keeps running, and NVDA speaks the answer when it is ready.
 The answer is always stored in the conversation where you asked the question, even if you switch to another conversation meanwhile.</p>
 
-<h2>The Ask GPT dialog</h2>
+<h2>The Ask AI dialog</h2>
 <p>Press Tab to move through the controls in this order:</p>
 <ul>
 <li><strong>Question</strong> (Alt+Q), then <strong>Ask</strong> (Alt+A; while waiting it becomes Cancel, Alt+C) and <strong>Dictate</strong> (Alt+D).</li>
 <li><strong>Conversation</strong> (Alt+V): the questions and answers so far.</li>
-<li><strong>Copy last answer</strong> (Alt+O) and <strong>Save answer as</strong> (Alt+S).</li>
-<li><strong>Model</strong> (Alt+M) and <strong>Reasoning effort</strong> (Alt+E) for this conversation.</li>
+<li><strong>Copy last answer</strong> (Alt+O) and <strong>Save answer as</strong> (Alt+W).</li>
+<li><strong>AI service</strong> (Alt+S): ChatGPT (Codex) or Claude (Claude Code) for this conversation. NVDA says, for example, "Now using Claude".</li>
+<li><strong>Model</strong> (Alt+M) and <strong>Reasoning effort</strong> (Alt+E) for this conversation; both lists follow the service.</li>
 <li><strong>Project folder</strong> (Alt+J, shows "None" when there is none), <strong>Choose project folder</strong> (Alt+F),
 <strong>Open folder in Explorer</strong> (Alt+X) and <strong>Clear project folder</strong> (Alt+L).</li>
 <li><strong>Conversations</strong> (Alt+R), <strong>New conversation</strong> (Alt+N) and Close.</li>
@@ -70,7 +102,7 @@ The answer is always stored in the conversation where you asked the question, ev
 <li>Press <strong>Control</strong> to stop NVDA reading an answer.</li>
 <li>Press <strong>NVDA+Alt+Shift+G</strong> from anywhere to hear the last answer of the current conversation again, even after closing the dialog or restarting NVDA.</li>
 <li>Press NVDA+Alt+Shift+G <strong>twice quickly</strong> to open the last answer in a window you can read with the arrow keys, line by line or word by word,
-exactly as GPT wrote it, including any code. Press Escape to close that window.</li>
+exactly as the AI wrote it, including any code. Press Escape to close that window.</li>
 </ul>
 
 <h2>Asking by voice</h2>
@@ -78,7 +110,7 @@ exactly as GPT wrote it, including any code. Press Escape to close that window.<
 After the message, Windows voice typing opens and <strong>NVDA goes quiet</strong>, so it does not read every word as it is typed into the Question box.
 Speak your question. NVDA speaks again, exactly in the speech mode you had before (talk, beeps or on-demand), as soon as one of these happens:</p>
 <ul>
-<li>you press <strong>Enter</strong> to send the question (NVDA then says "Asking GPT");</li>
+<li>you press <strong>Enter</strong> to send the question (NVDA then says "Asking ChatGPT" or "Asking Claude");</li>
 <li>you press <strong>Escape</strong>, or press <strong>Alt+D</strong> again (this also stops voice typing);</li>
 <li>you move out of the Question box or switch to another window;</li>
 <li>no new words arrive for a few seconds (the "Dictation silence timeout" setting, 4 seconds by default),
@@ -94,104 +126,136 @@ If you switch to another window before voice typing opens, it is not started, an
 <ul>
 <li>Press Alt+V to move to the Conversation box, then use the arrow keys to read the conversation line by line.
 The cursor is placed at the start of the newest answer, also when you open the dialog again. It is never moved while you are reading the box.</li>
-<li>Copy last answer (Alt+O) copies the latest answer to the clipboard exactly as GPT wrote it.</li>
-<li><strong>Save answer as</strong> (Alt+S) saves the latest answer as a file. Choose the format with the arrow keys and press Enter:
+<li>Copy last answer (Alt+O) copies the latest answer to the clipboard exactly as the AI wrote it.</li>
+<li><strong>Save answer as</strong> (Alt+W) saves the latest answer as a file. Choose the format with the arrow keys and press Enter:
 Word document (.docx), PDF document (.pdf), plain text (.txt), web page (.html) or Markdown (.md).
 Then type a file name (it starts with your question) and press Enter.
-The file goes into the conversation's project folder, or into <strong>Documents\Ask GPT</strong> when there is no project folder.
+The file goes into the conversation's project folder, or into <strong>Documents\Ask AI</strong> when there is no project folder.
 An existing file is never replaced: a number such as "(2)" is added instead. NVDA says the file name and the folder.
 The add-on makes these files itself, so Word does not need to be installed.
 PDF files use a standard font that covers Western European languages; other characters, for example Chinese, Arabic or emoji, appear as "?".
 Use Word or plain text for those languages.</li>
 </ul>
 
-<h2>Project folders: letting GPT create files</h2>
+<h2>Project folders: letting the AI read and create files</h2>
 <p>Each conversation can have a project folder, for example a folder with your notes or documents.
 Press <strong>Choose project folder</strong> (Alt+F) and pick the folder; NVDA says its name.
-With a project folder, GPT works inside that folder: it can read the files there, and (if the setting
-"Allow GPT to create and edit files in the project folder" is on, which is the default) create new files there, for example
-"Write my cover letter as a Word document". GPT tells you the file name, and NVDA also says
-"Created: cover letter.docx" (or "Changed: ...") after the answer. These lines are also added to the Conversation box.
-Open folder in Explorer (Alt+X) opens the folder; Clear project folder (Alt+L) removes it from the conversation (no files are deleted).</p>
-<p><strong>What protects your files.</strong> Codex is told not to change or delete existing files unless you ask, and it runs in Codex's own
+With a project folder, the AI works inside that folder: it can read the files there, and (if the setting
+"Allow the AI to create and edit files in the project folder" is on, which is the default) create new files there.
+The AI tells you the file name, and NVDA also says "Created: cover letter.docx" (or "Changed: ...") after the answer.
+These lines are also added to the Conversation box.
+Open folder in Explorer (Alt+X) opens the folder; Clear project folder (Alt+L) removes it from the conversation (no files are deleted).
+<strong>Only choose project folders you are happy for the AI to change, and keep a backup of important files.</strong>
+If you prefer the AI to only read your files, turn off "Allow the AI to create and edit files in the project folder" in the settings.</p>
+<p><strong>With ChatGPT (Codex)</strong>, Codex is told not to change or delete existing files unless you ask, and it runs in Codex's own
 "workspace-write" sandbox: it may write only inside the project folder, it has no internet access while working on files,
-and the .git, .codex and .agents folders stay read-only. The add-on never uses Codex's "bypass sandbox" mode.
+and the .git, .codex and .agents folders stay read-only. Codex can also make Word or PDF files, for example "Write my cover letter as a Word document".
+The add-on never uses Codex's "bypass sandbox" mode.
 On Windows this sandbox is Codex's Windows sandbox. How strong it is depends on your Windows version and Codex version:
 on Windows 11 24H2 or later Codex can use a built-in Windows isolation feature, while older systems use a weaker fallback that
-may need a one-time administrator setup by Codex. The Codex documentation does not say what happens when no Windows sandbox is set up,
-so <strong>only choose project folders you are happy for GPT to change, and keep a backup of important files</strong>.
-If you prefer GPT to only read your files, turn off "Allow GPT to create and edit files in the project folder" in the settings.
+may need a one-time administrator setup by Codex. The Codex documentation does not say what happens when no Windows sandbox is set up.
 Without a project folder, Codex always runs read-only in an empty private folder.</p>
+<p><strong>With Claude (Claude Code)</strong>, there is no operating-system sandbox on Windows. Instead the add-on only gives Claude the file tools
+Read, Glob and Grep (to read and search) and, when writing is allowed, Write and Edit. Claude Code keeps these tools inside the project folder.
+Claude gets no tool to run commands or programs and no web access, and the folder's own Claude Code settings are ignored.
+Because Claude cannot run programs, it can only create text-based files, such as Markdown (.md), web pages (.html) or CSV;
+for a Word or PDF document, ask for the text and use <strong>Save answer as</strong>, or ask Claude to write Markdown or HTML.
+Without a project folder, Claude has no tools at all.</p>
 
 <h2>Models</h2>
-<p>The <strong>Model</strong> choice (Alt+M) lists the models Codex offers to your account, taken from Codex's own list
+<p>The <strong>Model</strong> choice (Alt+M) lists the models of the conversation's service.
+For ChatGPT, the list is the models Codex offers to your account, taken from Codex's own list
 (the file models_cache.json in the .codex folder of your user profile, which Codex updates when it runs).
-"Default" lets Codex pick your plan's default model. When you change the model NVDA says, for example, "Model changed to GPT 6.1 Sol".
-<strong>Reasoning effort</strong> (Alt+E) lists only the levels the chosen model supports; lower is faster.
-The model and effort are remembered with each conversation. New conversations start with the defaults from the settings.</p>
+For Claude, the list is Claude Code's model names Sonnet, Opus, Haiku and Fable (Fable only if your plan includes it).
+"Default" lets the service pick your plan's default model. When you change the model NVDA says, for example, "Model changed to Opus".
+<strong>Reasoning effort</strong> (Alt+E) lists the levels the chosen model supports; lower is faster.
+The service, model and effort are remembered with each conversation. New conversations start with the defaults from the settings.
+You can type any other model name in the settings' Default model box.</p>
 
 <h2>Conversations</h2>
-<p>Every conversation is saved automatically after each answer and when you change its name, model or project folder.
-<strong>New conversation</strong> (Alt+N) starts a fresh one; the previous one stays saved.
-Press <strong>Conversations</strong> (Alt+R) in the Ask GPT dialog, choose NVDA menu, Tools, Ask GPT conversations,
-or assign a key to "Show Ask GPT conversations" in Input gestures. The conversation manager opens with the list of conversations,
-newest first, with the current one selected. The list has the columns Title, Updated, Messages and Project.</p>
+<p>Every conversation is saved automatically after each answer and when you change its name, service, model or project folder.
+<strong>New conversation</strong> (Alt+N) starts a fresh one with the default AI service; the previous one stays saved.
+Press <strong>Conversations</strong> (Alt+R) in the Ask AI dialog, choose NVDA menu, Tools, Ask AI conversations,
+or assign a key to "Show Ask AI conversations" in Input gestures. The conversation manager opens with the list of conversations,
+newest first, with the current one selected. The list has the columns Title, Updated, Messages, Project and Service.</p>
 <ul>
-<li><strong>Continue</strong> (Alt+C or Enter): open the selected conversation in the Ask GPT dialog, with its model and project folder.</li>
+<li><strong>Continue</strong> (Alt+C or Enter): open the selected conversation in the Ask AI dialog, with its service, model and project folder.</li>
 <li><strong>Rename</strong> (Alt+R): give it a title. An empty title goes back to the automatic one (the first question).</li>
 <li><strong>Archive</strong> (Alt+A): hide it from the list without deleting it. <strong>Show archived</strong> (Alt+H) lists archived conversations;
 for those the button is <strong>Unarchive</strong>.</li>
 <li><strong>Delete</strong> (Alt+D or the Delete key): permanently delete it, after a Yes/No question.</li>
 <li><strong>Export</strong> (Alt+X): save the whole conversation as a Word, PDF, text, web page or Markdown file
-(into its project folder, or Documents\Ask GPT).</li>
+(into its project folder, or Documents\Ask AI). Answers are headed ChatGPT or Claude.</li>
 <li><strong>Import</strong> (Alt+I): add a conversation from a .json file, for example one copied from another PC.</li>
 </ul>
-<p><strong>Where conversations are stored.</strong> One file per conversation in <code>%LOCALAPPDATA%\askGPT\conversations</code>.
+<p><strong>Where conversations are stored.</strong> One file per conversation in <code>%LOCALAPPDATA%\askAI\conversations</code>.
 In the settings you can choose another <strong>Conversations folder</strong>, for example a OneDrive folder, to continue your conversations on another PC.
-The files contain your questions and answers in plain text (JSON), so keep them somewhere private.</p>
+The files contain your questions and answers in plain text (JSON), so keep them somewhere private.
+On first start Ask AI copies the conversations of Ask GPT from <code>%LOCALAPPDATA%\askGPT\conversations</code>; the old files are left in place.</p>
 
 <h2>Settings</h2>
-<p>NVDA menu, Preferences, Settings, Ask GPT:</p>
+<p>NVDA menu, Preferences, Settings, Ask AI:</p>
 <ul>
-<li><strong>Status</strong>: shows Signed in with ChatGPT, Not signed in, Codex CLI not found, or Node.js not found.</li>
-<li><strong>Sign in with ChatGPT</strong> (Alt+S), <strong>Check status</strong> (Alt+H), <strong>Sign out</strong> (Alt+U, asks for confirmation),
-<strong>Copy sign-in link</strong> (Alt+Y, available while signing in).</li>
-<li><strong>Codex executable path</strong> (Alt+X): leave blank to find Codex automatically. Use Browse (Alt+B) to choose codex.exe or codex.cmd
-if it is installed somewhere unusual. For an npm install the path is <code>%APPDATA%\npm\codex.cmd</code>; you can type it exactly like that.</li>
-<li><strong>Default model</strong> (Alt+M): the model new conversations start with. The list comes from Codex; you can also type a model name. Blank uses your plan's default.</li>
+<li><strong>Default AI service</strong> (Alt+V): the service new conversations use.</li>
+<li><strong>Account settings for</strong> (Alt+G): which service the next controls show, up to Default reasoning effort.</li>
+<li><strong>Status</strong>: shows Signed in with ChatGPT, Signed in with Claude, Not signed in, Codex not found, Claude Code not found, or Node.js not found.</li>
+<li><strong>Sign in to ChatGPT</strong> or <strong>Sign in to Claude</strong> (Alt+S), <strong>Check status</strong> (Alt+H), <strong>Sign out</strong> (Alt+T, asks for confirmation),
+<strong>Copy sign-in link</strong> (Alt+Y, available while signing in) and, for Claude, <strong>Enter sign-in code</strong>.</li>
+<li><strong>Codex executable path</strong> or <strong>Claude Code executable path</strong> (Alt+X): leave blank to find the program automatically.
+Use Browse (Alt+B) to choose codex.exe, codex.cmd, claude.exe or claude.cmd if it is installed somewhere unusual.
+For an npm install of Codex the path is <code>%APPDATA%\npm\codex.cmd</code>; you can type it exactly like that.</li>
+<li><strong>Default model</strong> (Alt+M): the model new conversations of this service start with. You can also type a model name. Blank uses your plan's default.</li>
 <li><strong>Default reasoning effort</strong> (Alt+R): Low is fastest and fine for most questions.</li>
-<li><strong>Instructions for GPT</strong> (Alt+I): tells GPT how to answer. The default asks for short plain-text answers suited to a screen reader.</li>
+<li><strong>Instructions for the AI</strong> (Alt+I): tells the AI how to answer. The default asks for short plain-text answers suited to a screen reader.
+They are sent with every question, to both services.</li>
 <li><strong>Speak answers automatically</strong> (Alt+P, on by default).</li>
 <li><strong>Keep conversation context for follow-up questions</strong> (Alt+K, on by default). About the last 10 questions and answers are sent along with each new question.</li>
 <li><strong>Beep while waiting for an answer</strong> (Alt+W, on by default).</li>
-<li><strong>Allow GPT to create and edit files in the project folder</strong> (Alt+J, on by default). When off, GPT can only read the project folder.</li>
-<li><strong>Answer timeout in seconds</strong> (Alt+T, default 180, from 30 to 600).</li>
+<li><strong>Allow the AI to create and edit files in the project folder</strong> (Alt+J, on by default). When off, the AI can only read the project folder.</li>
+<li><strong>Answer timeout in seconds</strong> (Alt+N, default 180, from 30 to 600).</li>
 <li><strong>Dictation silence timeout in seconds</strong> (Alt+D, default 4, from 2 to 15): how long NVDA waits after the last dictated words before speaking again.</li>
 <li><strong>Conversations folder</strong> (Alt+F, blank for the default) and <strong>Choose folder</strong> (Alt+E).</li>
+<li><strong>Check for updates automatically</strong> (Alt+L, on by default) and <strong>Check for updates now</strong> (Alt+U).</li>
 </ul>
+
+<h2>Updates</h2>
+<p>If you installed Ask AI from a .nvda-addon file, it looks for a newer version on GitHub about 30 seconds after NVDA starts, at most once a day.
+You can also press Check for updates now in the settings, or choose NVDA menu, Tools, Check for Ask AI updates.
+When a newer version exists, NVDA asks "Ask AI 1.3.0 is available. Download and install now?". If you answer Yes, the add-on downloads it from
+GitHub, checks its SHA-256 checksum against the release's checksum file (it refuses to install a file that does not match), and then NVDA's own
+add-on installation asks you to confirm and to restart NVDA. Test versions (betas) are only offered if you use a test version.
+If you installed Ask AI from the NVDA Add-on Store, the store keeps it up to date instead
+(NVDA menu, Tools, Add-on Store, Updatable add-ons), and the add-on does not check GitHub.</p>
 
 <h2>Troubleshooting</h2>
 <ul>
 <li><strong>"The OpenAI Codex program was not found"</strong>: install it as described above, then restart NVDA. If it still is not found,
 set the Codex executable path to <code>%APPDATA%\npm\codex.cmd</code>.</li>
-<li><strong>"Node.js was not found"</strong>: Codex was installed with npm, but Node.js is missing. Install Node.js (see step 1), then restart NVDA.</li>
-<li><strong>"Codex is not signed in"</strong>: the add-on offers to open its settings; press Sign in with ChatGPT.</li>
-<li><strong>"Signed in with an API key"</strong>: Codex is using an API key, which is billed per use. Press Sign out, then Sign in with ChatGPT.</li>
-<li><strong>"You have reached the usage limit of your ChatGPT plan"</strong>: Codex usage limits depend on your plan. Try again later.</li>
-<li><strong>"Couldn't reach ChatGPT"</strong>: check your internet connection and try again.</li>
+<li><strong>"The Claude Code program was not found"</strong>: install it as described above, then restart NVDA, or set the Claude Code executable path
+to <code>%USERPROFILE%\.local\bin\claude.exe</code>.</li>
+<li><strong>"Node.js was not found"</strong>: the program was installed with npm, but Node.js is missing. Install Node.js (see above), then restart NVDA.</li>
+<li><strong>"Codex is not signed in" or "Claude Code is not signed in"</strong>: the add-on offers to open its settings; choose the service and press Sign in.</li>
+<li><strong>"Signed in with an API key"</strong>: the program is using a pay-per-use API account. Press Sign out, then sign in again.</li>
+<li><strong>"You have reached the usage limit of your ChatGPT plan" or "... Claude plan"</strong>: usage limits depend on your plan.
+For Claude, NVDA also says when the limit resets, if Claude Code reports it. Try again later, or switch the conversation to the other service.</li>
+<li><strong>"Claude is busy right now"</strong>: Anthropic's servers are overloaded; this is not your limit. Try again in a moment.</li>
+<li><strong>"This Claude Code version is too old for Ask AI"</strong>: run <code>claude update</code> in a command prompt.</li>
+<li><strong>"Couldn't reach ChatGPT" or "Couldn't reach Claude"</strong>: check your internet connection and try again.</li>
 <li><strong>"The project folder no longer exists"</strong>: the folder was moved or deleted. Choose another folder or clear it.</li>
-<li><strong>The model list only shows Default</strong>: Codex has not saved its model list yet. Ask one question, then reopen the dialog.</li>
+<li><strong>The ChatGPT model list only shows Default</strong>: Codex has not saved its model list yet. Ask one question, then reopen the dialog.</li>
 <li><strong>No answer in time</strong>: try again, choose a lower reasoning effort, or increase the timeout.</li>
 <li>Error entries in the Conversation box end with "Technical details", which you can copy into a support request.</li>
 </ul>
 
 <h2>Privacy</h2>
-<p>Your questions, and the earlier part of the conversation when context is on, are sent to OpenAI by the Codex program under your ChatGPT account.
-Without a project folder, Codex runs in a read-only sandbox in an empty folder (<code>%LOCALAPPDATA%\askGPT\workdir</code>) and is told not to run commands or touch files.
-With a project folder, Codex can read the files in it (see "Project folders" above).
-The add-on saves your conversations as described under "Where conversations are stored".
-Codex may keep its own session logs in the .codex folder in your user profile.
-When NVDA exits, any running Codex program is stopped and speech is turned back on if you were dictating.
+<p>Your questions, and the earlier part of the conversation when context is on, are sent by the conversation's program under your account:
+to OpenAI by Codex for ChatGPT, to Anthropic by Claude Code for Claude.
+Without a project folder, the program runs in an empty private folder (<code>%LOCALAPPDATA%\askAI\workdir</code>): Codex read-only, Claude without any tools.
+With a project folder, the AI can read the files in it (see "Project folders" above).
+The add-on saves your conversations as described under "Where conversations are stored". Claude Code is told not to keep its own session history
+for these questions; Codex may keep its own session logs in the .codex folder in your user profile.
+The update check contacts api.github.com and, for a download, github.com; it sends nothing but the add-on's version in its user agent.
+When NVDA exits, any running program is stopped and speech is turned back on if you were dictating.
 The add-on does nothing on secure screens such as the Windows sign-in screen.</p>
 </body>
 </html>

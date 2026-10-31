@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run the tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile every module
+        run: python -m py_compile addon/globalPlugins/askAI/*.py addon/globalPlugins/askAI/providers/*.py build.py tests/*.py
+
+      - name: Build the add-on
+        run: python build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: askAI-addon
+          path: askAI-*.nvda-addon
+          if-no-files-found: error

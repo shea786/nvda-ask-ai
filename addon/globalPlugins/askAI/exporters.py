@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: save text as Word, PDF, plain text, HTML or Markdown files.
+# Ask AI NVDA add-on: save text as Word, PDF, plain text, HTML or Markdown files.
 # Pure standard library and no NVDA imports, so it works on any PC without Office or Python packages.
 #
 # A document is a title plus a list of blocks: ("heading", text) or ("text", text).
@@ -68,7 +68,7 @@ def uniquePath(folder, baseName, extension, exists=os.path.exists):
 
 
 def defaultSaveFolder(documentsDir):
-	return os.path.join(documentsDir, "Ask GPT")
+	return os.path.join(documentsDir, "Ask AI")
 
 
 # Plain text helpers
@@ -202,7 +202,7 @@ def _coreProperties(title, now):
 		'<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" '
 		'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" '
 		'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-		"<dc:title>%s</dc:title><dc:creator>Ask GPT</dc:creator>"
+		"<dc:title>%s</dc:title><dc:creator>Ask AI</dc:creator>"
 		'<dcterms:created xsi:type="dcterms:W3CDTF">%s</dcterms:created>'
 		'<dcterms:modified xsi:type="dcterms:W3CDTF">%s</dcterms:modified>'
 		"</cp:coreProperties>"
@@ -361,7 +361,7 @@ def renderPdf(title, blocks):
 		len(pageIds),
 	)
 	infoId = nextId
-	objects[infoId] = b"<< /Title %s /Producer (Ask GPT for NVDA) >>" % _pdfTextString(title or "")
+	objects[infoId] = b"<< /Title %s /Producer (Ask AI for NVDA) >>" % _pdfTextString(title or "")
 	output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
 	offsets = {}
 	for objectId in sorted(objects):

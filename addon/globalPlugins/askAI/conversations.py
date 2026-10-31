@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: conversations saved as one JSON file each, so they survive NVDA restarts and
+# Ask AI NVDA add-on: conversations saved as one JSON file each, so they survive NVDA restarts and
 # can live in a synced folder (for example OneDrive) to continue on another PC.
 # Pure standard library, no NVDA imports.
 
@@ -11,27 +11,32 @@ import tempfile
 import time
 import uuid
 
-SCHEMA_VERSION = 1
+# 1: Ask GPT 1.1 (Codex only). 2: Ask AI 1.2 adds "provider" (and "provider" on assistant messages).
+SCHEMA_VERSION = 2
+# Conversations saved before services existed were all answered by Codex (ChatGPT).
+LEGACY_PROVIDER = "codex"
 FILE_SUFFIX = ".json"
 TITLE_LENGTH = 60
-# Older messages are dropped beyond this, to keep files small. GPT only ever sees the last few turns.
+# Older messages are dropped beyond this, to keep files small. The AI only ever sees the last few turns.
 MAX_MESSAGES = 1000
-# Roles stored in messages. Only "user" and "assistant" are sent back to GPT as context.
+# Roles stored in messages. Only "user" and "assistant" are sent back to the AI as context.
 ROLE_USER = "user"
 ROLE_ASSISTANT = "assistant"
 ROLE_ERROR = "error"
 ROLE_NOTE = "note"  # For example "Created: report.docx".
 ROLES = (ROLE_USER, ROLE_ASSISTANT, ROLE_ERROR, ROLE_NOTE)
 _ID = re.compile(r"^[0-9a-f]{32}$")
+# Service ids are stored as given (so a newer version's services survive), but must look like an id.
+_PROVIDER = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 
 
 def defaultConversationsDir(env=None, isWindows=os.name == "nt"):
-	"""%LOCALAPPDATA%\\askGPT\\conversations on Windows, else a folder in the temp directory."""
+	"""%LOCALAPPDATA%\\askAI\\conversations on Windows, else a folder in the temp directory."""
 	env = os.environ if env is None else env
 	localAppData = env.get("LOCALAPPDATA") if isWindows else None
 	if localAppData:
-		return os.path.join(localAppData, "askGPT", "conversations")
-	return os.path.join(tempfile.gettempdir(), "askGPT-conversations")
+		return os.path.join(localAppData, "askAI", "conversations")
+	return os.path.join(tempfile.gettempdir(), "askAI-conversations")
 
 
 def titleFromQuestion(question, length=TITLE_LENGTH):
@@ -59,6 +64,7 @@ class Conversation:
 		reasoningEffort="",
 		messages=None,
 		titleIsCustom=False,
+		provider=LEGACY_PROVIDER,
 	):
 		now = time.time()
 		self.id = id or uuid.uuid4().hex
@@ -71,14 +77,20 @@ class Conversation:
 		self.reasoningEffort = reasoningEffort or ""
 		self.messages = list(messages or [])
 		self.titleIsCustom = bool(titleIsCustom)
+		# The AI service ("codex", "claude") this conversation asks next.
+		self.provider = provider or LEGACY_PROVIDER
 
 	# Messages
 
-	def addMessage(self, role, text, when=None):
+	def addMessage(self, role, text, when=None, provider=None):
+		"""Add a message. Assistant messages record the service that wrote them (default: the conversation's)."""
 		if role not in ROLES:
 			raise ValueError("Unknown role %r" % role)
 		when = time.time() if when is None else when
-		self.messages.append({"role": role, "text": text or "", "time": when})
+		message = {"role": role, "text": text or "", "time": when}
+		if role == ROLE_ASSISTANT:
+			message["provider"] = provider or self.provider
+		self.messages.append(message)
 		del self.messages[:-MAX_MESSAGES]
 		if role == ROLE_USER and not self.titleIsCustom and not self.title:
 			self.title = titleFromQuestion(text)
@@ -111,7 +123,7 @@ class Conversation:
 	@property
 	def history(self):
 		"""(role, text) pairs for the prompt: answered questions and their answers only.
-		Questions that failed or were cancelled are left out, so GPT does not see them twice.
+		Questions that failed or were cancelled are left out, so the AI does not see them twice.
 		"""
 		result = []
 		pendingQuestion = None
@@ -169,12 +181,15 @@ class Conversation:
 			"projectFolder": self.projectFolder,
 			"model": self.model,
 			"reasoningEffort": self.reasoningEffort,
+			"provider": self.provider,
 			"messages": self.messages,
 		}
 
 	@classmethod
 	def fromDict(cls, data):
-		"""Build from saved JSON. Raises ValueError for data that is not a usable conversation."""
+		"""Build from saved JSON. Raises ValueError for data that is not a usable conversation.
+		Schema 1 files (Ask GPT 1.1) have no provider: they were answered by Codex.
+		"""
 		if not isinstance(data, dict):
 			raise ValueError("not a JSON object")
 		version = data.get("schemaVersion", 1)
@@ -183,6 +198,9 @@ class Conversation:
 		conversationId = data.get("id")
 		if not isinstance(conversationId, str) or not _ID.match(conversationId):
 			raise ValueError("missing or invalid id")
+		provider = data.get("provider") if version >= 2 else LEGACY_PROVIDER
+		if not isinstance(provider, str) or not _PROVIDER.match(provider):
+			provider = LEGACY_PROVIDER
 		messages = []
 		for message in data.get("messages") or []:
 			if (
@@ -191,13 +209,17 @@ class Conversation:
 				and isinstance(message.get("text"), str)
 			):
 				when = message.get("time")
-				messages.append(
-					{
-						"role": message["role"],
-						"text": message["text"],
-						"time": float(when) if isinstance(when, (int, float)) else 0.0,
-					},
-				)
+				entry = {
+					"role": message["role"],
+					"text": message["text"],
+					"time": float(when) if isinstance(when, (int, float)) else 0.0,
+				}
+				if message["role"] == ROLE_ASSISTANT:
+					messageProvider = message.get("provider")
+					if not isinstance(messageProvider, str) or not _PROVIDER.match(messageProvider):
+						messageProvider = LEGACY_PROVIDER if version < 2 else provider
+					entry["provider"] = messageProvider
+				messages.append(entry)
 
 		def text(key):
 			value = data.get(key)
@@ -218,6 +240,7 @@ class Conversation:
 			reasoningEffort=text("reasoningEffort"),
 			messages=messages,
 			titleIsCustom=data.get("titleIsCustom") is True,
+			provider=provider,
 		)
 
 

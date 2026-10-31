@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: pure text helpers (no NVDA imports, testable anywhere).
+# Ask AI NVDA add-on: pure text helpers (no NVDA imports, testable anywhere).
 
 import re
 

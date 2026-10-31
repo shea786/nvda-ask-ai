@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build askGPT-<version>.nvda-addon from the addon/ folder using only the standard library."""
+"""Build askAI-<version>.nvda-addon from the addon/ folder using only the standard library."""
 
 import configparser
 import os

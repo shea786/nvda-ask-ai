@@ -35,18 +35,24 @@ class TestCompile(unittest.TestCase):
 				py_compile.compile(path, cfile=os.path.join(tempDir, "%d.pyc" % index), doraise=True)
 
 	def test_noRemovedModules(self):
-		for name in ("openaiClient.py", "credentials.py", "recorder.py"):
+		for name in ("openaiClient.py", "credentials.py", "recorder.py", "codexClient.py", "modelCatalog.py"):
 			self.assertFalse(os.path.exists(os.path.join(helpers.PACKAGE_DIR, name)), name)
+		self.assertFalse(os.path.exists(os.path.join(ROOT, "addon", "globalPlugins", "askGPT")))
 
 	def test_pureModulesHaveNoNvdaImports(self):
 		for name in (
-			"codexClient.py",
+			"providers/__init__.py",
+			"providers/base.py",
+			"providers/codex.py",
+			"providers/claude.py",
+			"providers/modelCatalog.py",
 			"textUtils.py",
 			"conversations.py",
 			"dictation.py",
 			"exporters.py",
 			"folderSnapshot.py",
-			"modelCatalog.py",
+			"migration.py",
+			"updater.py",
 		):
 			with open(os.path.join(helpers.PACKAGE_DIR, name), encoding="utf-8") as f:
 				source = f.read()
@@ -78,8 +84,46 @@ class TestUserDocs(unittest.TestCase):
 			"Press <strong>Control</strong> to stop",
 			"twice quickly",
 			"Shift+Enter",
+			# Ask AI 1.2: Claude setup and sign-in, the honest Windows note, updates and the licence.
+			"irm https://claude.ai/install.ps1 | iex",
+			"npm install -g @anthropic-ai/claude-code",
+			"claude update",
+			"Enter sign-in code",
+			"no operating-system sandbox on Windows",
+			"Save answer as",
+			"Check for updates now",
+			"Add-on Store",
+			"GNU General Public License version 2",
+			"%LOCALAPPDATA%\\askAI\\conversations",
 		):
 			self.assertIn(required, html)
+		self.assertNotIn("askGPT-1.1.0", html)
+
+	def test_repositoryDocs(self):
+		for name in ("README.md", "RELEASING.md", "LICENSE", os.path.join("tester", "TESTING.txt")):
+			self.assertTrue(os.path.isfile(os.path.join(ROOT, name)), name)
+		with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as f:
+			readme = f.read()
+		self.assertIn("GNU General Public License version 2", readme)
+		self.assertIn("askAI-1.2.0.nvda-addon", readme)
+		with open(os.path.join(ROOT, "tester", "TESTING.txt"), encoding="utf-8") as f:
+			testing = f.read()
+		self.assertIn("askAI-1.2.0.nvda-addon", testing)
+		self.assertIn("Claude", testing)
+		with open(os.path.join(ROOT, "LICENSE"), encoding="utf-8") as f:
+			license = f.read()
+		with open(os.path.join(ROOT, "addon", "copying.txt"), encoding="utf-8") as f:
+			self.assertEqual(f.read(), license)
+		self.assertIn("GNU GENERAL PUBLIC LICENSE", license)
+		self.assertIn("Version 2, June 1991", license)
+
+	def test_workflows(self):
+		with open(os.path.join(ROOT, ".github", "workflows", "release.yml"), encoding="utf-8") as f:
+			release = f.read()
+		for required in ('"v*"', "contents: write", "python-version: \"3.11\"", "unittest discover", "build.py",
+				"SHA256SUMS.txt", "TESTING.txt", "--prerelease", "GITHUB_TOKEN", "actions/checkout@v4", "actions/setup-python@v5"):
+			self.assertIn(required, release)
+		self.assertTrue(os.path.isfile(os.path.join(ROOT, ".github", "workflows", "ci.yml")))
 
 
 class TestManifest(unittest.TestCase):
@@ -88,15 +132,20 @@ class TestManifest(unittest.TestCase):
 		with open(os.path.join(ROOT, "addon", "manifest.ini"), encoding="utf-8") as f:
 			parser.read_string("[m]\n" + f.read())
 		manifest = parser["m"]
-		self.assertEqual(manifest["name"], "askGPT")
-		self.assertEqual(manifest["version"], "1.1.0")
+		self.assertEqual(manifest["name"], "askAI")
+		self.assertEqual(manifest["summary"], '"Ask AI"')
+		self.assertEqual(manifest["version"], "1.2.0")
+		self.assertEqual(manifest["author"], '"Asif Ali"')
+		self.assertEqual(manifest["url"], '"https://github.com/shea786/nvda-ask-gpt"')
+		self.assertIn("ChatGPT", manifest["description"])
+		self.assertIn("Claude", manifest["description"])
 		self.assertEqual(manifest["minimumNVDAVersion"], "2024.1")
 		self.assertEqual(manifest["lastTestedNVDAVersion"], "2026.1")
 
 
 class TestBuild(unittest.TestCase):
 	def test_buildProducesValidAddon(self):
-		spec = importlib.util.spec_from_file_location("askGPTBuild", os.path.join(ROOT, "build.py"))
+		spec = importlib.util.spec_from_file_location("askAIBuild", os.path.join(ROOT, "build.py"))
 		build = importlib.util.module_from_spec(spec)
 		spec.loader.exec_module(build)
 		outDir = tempfile.mkdtemp()
@@ -105,25 +154,35 @@ class TestBuild(unittest.TestCase):
 		cacheDir = os.path.join(helpers.PACKAGE_DIR, "__pycache__")
 		os.makedirs(cacheDir, exist_ok=True)
 		path = build.build(outDir)
-		self.assertEqual(os.path.basename(path), "askGPT-1.1.0.nvda-addon")
+		self.assertEqual(os.path.basename(path), "askAI-1.2.0.nvda-addon")
 		with zipfile.ZipFile(path) as archive:
 			names = archive.namelist()
 			self.assertIsNone(archive.testzip())
 		self.assertIn("manifest.ini", names)
 		for module in (
 			"__init__",
-			"codexClient",
 			"conversationManager",
 			"conversations",
 			"dialogs",
 			"dictation",
 			"exporters",
 			"folderSnapshot",
-			"modelCatalog",
+			"migration",
 			"textUtils",
+			"updateCheck",
+			"updater",
+			"providers/__init__",
+			"providers/base",
+			"providers/codex",
+			"providers/claude",
+			"providers/modelCatalog",
 		):
-			self.assertIn("globalPlugins/askGPT/%s.py" % module, names)
+			self.assertIn("globalPlugins/askAI/%s.py" % module, names)
 		self.assertIn("doc/en/readme.html", names)
+		self.assertIn("copying.txt", names)
+		with zipfile.ZipFile(path) as archive:
+			self.assertTrue(archive.read("copying.txt").decode("utf-8").lstrip().startswith("GNU GENERAL PUBLIC LICENSE"))
+		self.assertFalse([n for n in names if "askGPT" in n])
 		self.assertFalse([n for n in names if "__pycache__" in n or n.endswith(".pyc")])
 		self.assertFalse([n for n in names if n.startswith("addon/")])
 
