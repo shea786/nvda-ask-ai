@@ -59,9 +59,12 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			# Translators: Label of the field that filters the conversations by title and message text.
 			_("&Search:"),
 			wx.TextCtrl,
+			style=wx.TE_PROCESS_ENTER,
 			size=(self.scaleSize(300), -1),
 		)
 		self.searchCtrl.Bind(wx.EVT_TEXT, self.onSearchText)
+		# Enter filters at once and continues the first match.
+		self.searchCtrl.Bind(wx.EVT_TEXT_ENTER, self.onSearchEnter)
 
 		self.listCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the list of saved conversations.
@@ -73,15 +76,15 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		for column, (label, width) in enumerate(
 			(
 				# Translators: Column in the conversation list.
-				(_("Title"), 280),
+				(_("Title"), 240),
 				# Translators: Column in the conversation list: when it was last used.
-				(_("Updated"), 140),
+				(_("Updated"), 120),
 				# Translators: Column in the conversation list: number of questions and answers.
-				(_("Messages"), 80),
-				# Translators: Column in the conversation list: the project folder name.
-				(_("Project"), 120),
+				(_("Messages"), 70),
+				# Translators: Column in the conversation list: the project folder (full path).
+				(_("Project"), 200),
 				# Translators: Column in the conversation list: the AI service, e.g. "ChatGPT" or "Claude".
-				(_("Service"), 90),
+				(_("Service"), 80),
 			),
 		):
 			self.listCtrl.InsertColumn(column, label, width=self.scaleSize(width))
@@ -170,19 +173,24 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			self._searchTimer.Stop()
 		self._searchTimer = wx.CallLater(SEARCH_DEBOUNCE_MS, self._applySearch)
 
-	def _applySearch(self):
+	def _applySearch(self, announce=True):
 		self._searchTimer = None
 		if not self:
 			return
 		self.populate(self._selectedId())
-		count = len(self._items)
-		if self.query:
-			# Translators: Announced after filtering the conversations. {count} is a number.
-			message = ngettext("{count} conversation matches", "{count} conversations match", count).format(count=count)
-		else:
-			# Translators: Announced when the search field is emptied. {count} is a number.
-			message = ngettext("{count} conversation", "{count} conversations", count).format(count=count)
-		ui.message(message)
+		if announce:
+			ui.message(searchSummary(self.query, self._items))
+
+	def onSearchEnter(self, evt):
+		if self._searchTimer is not None:
+			self._searchTimer.Stop()
+			self._searchTimer = None
+		self._applySearch(announce=False)
+		if not self._items:
+			ui.message(searchSummary(self.query, self._items))
+			return
+		self.listCtrl.Select(0)
+		self.onContinue(None)
 
 	def populate(self, selectId=None, selectIndex=None):
 		includeArchived = self.archivedCheck.GetValue()
@@ -211,8 +219,8 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 				),
 			)
 			self.listCtrl.SetItem(index, 2, str(conversation.turnCount))
-			folder = conversation.projectFolder
-			self.listCtrl.SetItem(index, 3, os.path.basename(os.path.normpath(folder)) if folder else "")
+			# The full path: a basename would be empty for a drive root and hide where the folder is.
+			self.listCtrl.SetItem(index, 3, conversation.projectFolder)
 			self.listCtrl.SetItem(index, 4, providers.shortName(conversation.provider))
 		if self.query:
 			# Translators: Shown instead of the list when no conversation matches the search.
@@ -371,7 +379,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		if chosen is None:
 			return
 		formatKey, baseName = chosen
-		folder = conversation.projectFolder if os.path.isdir(conversation.projectFolder or "") else dialogs.documentsFolder()
+		folder = dialogs.existingProjectFolder(conversation) or dialogs.documentsFolder()
 		dialogs.saveDocument(
 			self,
 			folder,
@@ -408,6 +416,31 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		wx.CallLater(ANNOUNCE_DELAY_MS, ui.message, _("Imported {title}").format(title=conversation.title or _("Untitled conversation")))
 
 
+def searchSummary(query, items):
+	"""After filtering: "3 match; first: Trip to Paris", "No conversations match", or the count."""
+	count = len(items)
+	if not query:
+		# Translators: Announced when the search field is emptied. {count} is a number.
+		return ngettext("{count} conversation", "{count} conversations", count).format(count=count)
+	if not count:
+		# Translators: Announced when no conversation matches the search.
+		return _("No conversations match")
+	# Translators: Announced after filtering, e.g. "3 match; first: Trip to Paris".
+	return ngettext("{count} match; first: {title}", "{count} match; first: {title}", count).format(
+		count=count,
+		title=items[0].title or _("Untitled conversation"),
+	)
+
+
+def continuingText(title, template="Continuing {title}."):
+	""""Continuing Trip to Paris." without a doubled full stop after a title ending in ".", "?" or "!"."""
+	title = title.rstrip(".")
+	text = template.format(title=title)
+	if title.endswith(("?", "!")):
+		text = text.replace(title + ".", title, 1)
+	return text
+
+
 def showConversationManager(parent):
 	"""Show the manager modally; continuing a conversation makes it current and shows the Ask dialog."""
 	dialog = ConversationManagerDialog(parent)
@@ -418,18 +451,21 @@ def showConversationManager(parent):
 		dialog.Destroy()
 	if result != wx.ID_OK or chosen is None:
 		return
-	dialogs.switchConversation(chosen)
+	restored = dialogs.switchConversation(chosen)
 	askDialog = dialogs.AskAIDialog.getInstance()
 	if askDialog is None:
 		dialogs.openAskDialog()
+		askDialog = dialogs.AskAIDialog.getInstance()
+		restored = bool(askDialog is not None and chosen.draft and askDialog.questionCtrl.GetValue() == chosen.draft)
 	else:
 		askDialog.Raise()
 	# Translators: Announced after continuing a conversation. {title} is its title.
-	wx.CallLater(
-		ANNOUNCE_DELAY_MS,
-		ui.message,
-		_("Continuing {title}").format(title=chosen.title or _("Untitled conversation")),
-	)
-	askDialog = dialogs.AskAIDialog.getInstance()
+	message = continuingText(chosen.title or _("Untitled conversation"), _("Continuing {title}."))
+	if restored:
+		# Translators: Added after "Continuing <title>." when the conversation's unsent question came back.
+		message += " " + _("Draft restored.")
 	if askDialog is not None:
 		askDialog.questionCtrl.SetFocus()
+		dialogs.announceWhenFocused(askDialog.questionCtrl, message)
+	else:
+		ui.message(message)

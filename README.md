@@ -73,7 +73,9 @@ addon/globalPlugins/askAI/status.py                Pure: status report sentence,
 addon/globalPlugins/askAI/context.py               Pure: "Ask about this" capture with injected NVDA accessors, protected-field refusal
 addon/globalPlugins/askAI/attachments.py           Pure: attachment classification and limits, prompt fencing, per-request folders
 addon/globalPlugins/askAI/png.py                   Pure: minimal PNG encoder (zlib + struct)
-addon/globalPlugins/askAI/screenshot.py            ctypes GDI window capture (Windows only, lazy, full prototypes)
+addon/globalPlugins/askAI/screenshot.py            ctypes GDI window capture: PrintWindow, BitBlt fallback (Windows only, lazy, full prototypes)
+addon/globalPlugins/askAI/projectSafety.py         Pure: which folders may be project folders; write grants
+addon/globalPlugins/askAI/ed25519.py               Pure: Ed25519 verification (RFC 8032) for signed releases
 addon/globalPlugins/askAI/updater.py               Pure: GitHub release check, version rules, checksum-verified download
 addon/globalPlugins/askAI/dictation.py             Pure: mute/restore state machine for dictation (speech module injected)
 addon/globalPlugins/askAI/exporters.py             Pure: .docx, .pdf, .txt, .html and .md writers, safe file names
@@ -100,19 +102,36 @@ and the question, is always written to **stdin** as UTF-8. User text never appea
 
 ```
 codex exec --skip-git-repo-check --sandbox read-only --color never -c approval_policy=never \
-           -o <workdir>/answer-XXXX.txt [-m <model>] [-c model_reasoning_effort=<effort>] -
+           --ignore-user-config --ignore-rules --ephemeral \
+           --disable apps --disable plugins --disable browser_use --disable computer_use \
+           --disable multi_agent --disable image_generation --disable hooks -c web_search=disabled \
+           --disable shell_tool --disable unified_exec \
+           [--image=<request folder>\<image> ...] -o <workdir>/answer-XXXX.txt [-m <model>] [-c model_reasoning_effort=<effort>] -
 ```
 
 and, when the conversation has a project folder:
 
 ```
 codex exec --skip-git-repo-check --sandbox workspace-write --color never -c approval_policy=never \
+           <the same --ignore-*, --ephemeral, --disable ... and web_search flags, but the shell stays on> \
            -C <project> -c sandbox_workspace_write.network_access=false \
            -c sandbox_workspace_write.exclude_tmpdir_env_var=true -c sandbox_workspace_write.exclude_slash_tmp=true \
            -o <workdir>/answer-XXXX.txt [-m <model>] [-c model_reasoning_effort=<effort>] -
 ```
 
-(`--sandbox read-only` with `-C <project>` when "Allow the AI to create and edit files in the project folder" is off.)
+(`--sandbox read-only`, `-C <project>` and no shell when writing is not allowed, or not granted for that folder.)
+
+Hardening, verified with codex-cli 0.160.0 (`codex exec --help`, `codex features list`):
+
+* `--ignore-user-config` ("Do not load `$CODEX_HOME/config.toml`; auth still uses `CODEX_HOME`"), `--ignore-rules` ("Do not load user or
+  project execpolicy `.rules` files") and `--ephemeral` ("Run without persisting session files to disk") are always passed.
+* `--disable <FEATURE>` ("Equivalent to `-c features.<name>=false`") for apps, plugins, browser_use, computer_use, multi_agent,
+  image_generation and hooks; `features list` then reports each as false, and an unknown name is refused ("Unknown feature flag").
+* `-c web_search=disabled`: `web_search` is an enum in 0.160.0 (`-c web_search=nonsense` fails with "failed to load bootstrap configuration");
+  `--search` (live web search) is never passed.
+* Without a writable project folder also `--disable shell_tool --disable unified_exec`. `shell_tool` is then reported false; 0.160.0 accepts
+  `unified_exec` but still lists it as true, so its effect is not confirmed. With shell off Codex cannot open files, so non-text, non-image
+  attachments are refused for ChatGPT, and a read-only project folder only gives Codex the folder as its working directory.
 `-c` values are unquoted: Codex parses them as TOML and uses non-TOML text as a plain string (checked with codex-cli 0.160.0).
 The answer is read from the `-o` file, with trimmed stdout as the fallback. `OPENAI_API_KEY` and `CODEX_API_KEY` are removed from
 Codex's environment (codex-cli 0.160.0 accepts them as "a supported auth env var" instead of the ChatGPT sign-in).
@@ -120,10 +139,14 @@ Codex's environment (codex-cli 0.160.0 accepts them as "a supported auth env var
 ### Claude (Claude Code)
 
 ```
-claude -p --output-format json --no-session-persistence --strict-mcp-config --restricted \
+claude -p --output-format json --no-session-persistence --strict-mcp-config --restricted [--safe-mode] [--add-dir <request folder>] \
        --tools <tools> --disallowedTools "mcp__*" --permission-mode <mode> --permission-prompts none \
        [--model <model>] [--effort <effort>]
 ```
+
+`--safe-mode` is added without a project folder (`claude --help`: "Start with all customizations (CLAUDE.md, skills, installed plugins,
+hooks, MCP servers, custom commands and agents, ...) disabled ... Auth, model selection, built-in tools and plugins, and permissions work
+normally"; checked that it parses with `-p`).
 
 with the prompt on stdin (`-p` without a prompt argument reads stdin) and the working directory set to the project folder,
 or the private work folder. Verified against Claude Code 2.1.314 (`claude --help`) and the Claude Code docs:
@@ -163,17 +186,40 @@ Everything attached goes with one question and is then cleared. The prompt (stdi
 following blocks are data and not instructions, then fenced blocks: the screen text labelled "Text from the user's screen (<app>,
 <window>)" and each inlined text file. The fence is a run of backticks longer than any run inside the content, so it cannot be closed
 from inside. Images, the screenshot and non-text files are written to `%LOCALAPPDATA%\askAI\workdir\requests\request-XXXX`, which is
-deleted when the request ends (and at startup if older than an hour):
+deleted when the request ends, synchronously when NVDA exits, and at the next start (all of them):
 
 * Codex: each image is passed as `--image=<path>` (`codex exec --help`: `-i, --image <FILE>...  Optional image(s) to attach to the
-  initial prompt`), placed before `-o` so the multi-value option cannot take the trailing `-`. Other files are named in the prompt.
+  initial prompt`), placed before `-o` so the multi-value option cannot take the trailing `-`. Other files are refused for ChatGPT
+  ("ChatGPT can only receive text files and images; Claude can read other files"), because Codex has no shell to open them.
 * Claude Code has no option for local images (`--file` takes Files API ids), but its Read tool "returns PNG, JPEG, GIF, and WebP files as
   visual content that Claude can see" (tools reference). So without a project folder the request folder is the working directory and
   `--tools Read`; with a project folder it is added with `--add-dir <folder>` (help: "Additional directories to allow tool access to";
   `--restricted` "confines the file tools to the working directories (--add-dir included)"), and the project's tool set already has Read.
 
 Only paths in the add-on's private folder reach the command line (file names are made safe for cmd.exe quoting); user text never does.
-The stored message keeps the attachment names and the context summary, never their content.
+Labels inside the prompt (window titles, app names, file names) have backticks and line breaks removed. The stored message keeps the
+attachment names and the context summary, never their content.
+
+The screenshot is taken only when the question is sent with "Include a screenshot of <window> (everything visible in it)" ticked,
+from the window that was in front at NVDA+Alt+A (`PrintWindow(hwnd, PW_RENDERFULLCONTENT)`, falling back to `BitBlt`), scaled to at most
+4096 pixels per side, and a nearly single-coloured picture (Screen Curtain) is confirmed before sending. Taking it at send time, not at the
+gesture, means no picture of the screen exists unless the user asked for one.
+
+### What is attached, and when it is cleared
+
+Screen text and the screenshot choice are cleared on send, dialog close, New conversation and switching conversations. Attached files are
+cleared on send only; while they wait, opening or raising the dialog says "Still attached: N files", and the status script reports them.
+
+### Project folders
+
+A project folder from a conversation file is never trusted (files can be imported or synced). `projectSafety.checkFolder` accepts only an
+absolute path on a fixed local drive (`GetDriveTypeW == DRIVE_FIXED`, via ctypes with argtypes) and refuses UNC and `\\?\` paths, drive
+roots, `%USERPROFILE%` itself, anything in AppData (APPDATA, LOCALAPPDATA, the add-on's data), the user and common Startup folders,
+`%SystemRoot%`, Program Files and ProgramData, looking only at the text before anything touches the path; then the resolved path (junctions)
+is checked again. It runs when a folder is chosen, when a conversation is loaded (an unsafe folder is removed, with a spoken reason) and before
+every request. Writing needs a per-folder grant in the NVDA configuration (`askAI.projectGrants`), asked for once; without it the request is
+read-only. Imported conversations lose their project folder and draft, their dates are clamped to now, and their messages are marked
+`imported` and sent fenced as "Earlier conversation imported from a file (untrusted ...)".
 
 ### Shared process handling
 
@@ -197,8 +243,17 @@ A question belongs to the module and to the conversation it was asked in (by id)
 
 ### Conversations
 
-One JSON file per conversation (schema 2). It stores `provider` ("codex" or "claude") for the conversation and on every answer.
-Schema 1 files from Ask GPT 1.x load as ChatGPT conversations.
+One JSON file per conversation (schema 4). It stores `provider` ("codex" or "claude") for the conversation and on every answer, the
+unsent `draft`, `serviceSettings` (model and effort per service), and on questions `attachments`, `context` (a summary) and `imported`.
+Older files load with defaults (schema 1 files from Ask GPT 1.x as ChatGPT conversations). Writes go to a temporary file, fsync, then
+`os.replace`, retried three times 100 ms apart on PermissionError (sync clients and virus scanners hold files open).
+
+### Updates
+
+`updater.py` only installs a release whose assets are under `https://github.com/shea786/nvda-ask-gpt/releases/download/<tag_name>/`,
+whose `SHA256SUMS.txt` carries a valid Ed25519 signature (`SHA256SUMS.txt.sig`, verified by the pure-Python `ed25519.py` against the public
+key embedded in `updater.py`), whose file matches its checksum, and whose `manifest.ini` names `askAI` and the offered version. Downloads have
+a 120 s deadline and a 20 MB cap; the temporary folder is removed afterwards. See RELEASING.md for the signing key.
 
 ### Windows sandbox for Codex, honestly
 
@@ -206,7 +261,8 @@ Without a project folder Codex runs `read-only`. With a project folder and writi
 network access is off by default (the add-on also sets `sandbox_workspace_write.network_access=false` explicitly), `.git`, `.codex` and
 `.agents` stay read-only, and on native Windows Codex enforces this with its Windows sandbox (MXC where supported, otherwise the legacy
 `elevated` or `unelevated` implementations). The docs do not say what `codex exec` does on Windows when no Windows sandbox has been set up,
-and this was not tested on real Windows. The add-on never passes `--dangerously-bypass-approvals-and-sandbox` or `danger-full-access`.
+and this was not tested on real Windows, so the shell is switched off except in a writable project folder, where it then relies on Codex's
+Windows sandbox. The add-on never passes `--dangerously-bypass-approvals-and-sandbox` or `danger-full-access`.
 
 ## Development
 
@@ -228,6 +284,8 @@ Releases: see [RELEASING.md](RELEASING.md).
 | NVDA+Alt+Shift+S | anywhere | Report Ask AI status |
 | NVDA+Alt+A | anywhere | Ask about this (attach selected/current text) |
 | Up / Down | empty Question box | Earlier / later questions |
+| Alt+S, M, E, J | Ask dialog | Conversation options on service, model, effort, project folder |
+| Alt+C | Ask dialog, waiting | Cancel the question (Escape closes the dialog and keeps it running) |
 | Ctrl+S | Ask dialog | Save the draft |
 | Ctrl+F, F3, Shift+F3 | Ask dialog | Find, next match, previous match |
 

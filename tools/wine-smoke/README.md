@@ -27,11 +27,20 @@ so no ChatGPT or Claude usage is spent. Nothing here is shipped; `build.py` only
   project folder (file tools only, `acceptEdits`, cwd), a Claude sign-in error, the Service column, and both services in
   the settings ("Default AI service", "Account settings for", Claude's sign-in labels, path and sign-in code button).
   Round 6 checks (`_round6a`): Ctrl+F through the real find prompt, F3 / Shift+F3 with wrap-around, "No matches for", Up/Down
-  question recall, Ctrl+S drafts restored on reopening, NVDA+Alt+Shift+S while answering and idle, and "Done: <title>." when the
+  question recall, Ctrl+S drafts restored on reopening, NVDA+Alt+Shift+S while answering and idle, and "Ask AI answer, <title>:" when the
   answer arrives with the dialog closed. (`_round6b`): NVDA+Alt+A on a selected multi-line edit (a window in NVDA's own process,
-  because Wine without a window manager never brings Notepad to the foreground) with the Context field and a GDI screenshot sent as
+  because Wine without a window manager never brings Notepad to the foreground) with the Attached list and a screenshot sent as
   `--image=`, refusal on a password field, Attach files (text inlined, picture as `--image=` for Codex, `--tools Read` in the
   request folder for Claude), a long paste sent as question.txt, and the conversation manager's Search field.
+  Round 7 (the 1.2.0 security and accessibility fixes) updated these steps: the old add-on question comes on the first Ask
+  dialog (a Yes/No dialog where Escape asks again), "Ask AI answer, <title>:", the status wording and locale time, the
+  "Attached to next question" list (source and size of the screen text, screenshot box naming the window, the picture taken
+  only when sending), ChatGPT refusing a file that is not text or a picture, Codex hardening flags, Claude's `--safe-mode`,
+  switching service through Conversation options, Search's "N match; first: <title>" and Enter continuing the first match,
+  and the Settings changes (grouped account section, "Claude: Signed in with Claude", no update button).
+  `ASKAI_SMOKE_ONLY=oldaddon` runs the whole old add-on question (Escape, asked again, No) and Escape closing the dialog
+  while a request keeps running; the round6 runs answer No straight away to keep the number of windows down.
+  The `new` mode and the full run still drive the round 5 service controls in the Ask dialog and were not updated.
 * `run.sh`: rebuilds the add-on, writes a fresh `userConfig` (silence synth, no welcome dialog, an `[askGPT]` section with
   `codexPath = C:\fakecodex\codex.cmd` for the migration), resets the conversation folders, `C:\smokeproject` and
   `Documents\Ask AI`, starts NVDA with debug logging on an Xvfb display, takes a screenshot at each test phase, checks that no
@@ -45,7 +54,7 @@ One-time setup (NVDA 2026.x fails under Wine 10.0: `GetConsoleSelectionInfo` is 
     wine nvda_2025.3.3.exe --create-portable-silent --portable-path='C:\nvda'   # files appear; the launcher may hang on exit
 
 Then run `tools/wine-smoke/run.sh` (pass `WINEPREFIX=` and `OUT=` if they are elsewhere; `ASKAI_SMOKE_ONLY=new` runs only
-the Ask AI 1.2 steps (`round6`, or `round6a`, `round6b`, `round6c` for a third of them each), which helps when Wine 10's wineserver crashes with `add_queue_hook_count: Assertion ... failed`
+the Ask AI 1.2 steps (`round6`, or `round6a`, `round6b`, `round6c` for a third of them each, or `oldaddon`), which helps when Wine 10's wineserver crashes with `add_queue_hook_count: Assertion ... failed`
 after many short-lived processes; that crash also happens with the unchanged 1.1 harness). Output goes to
 `$HOME/nvda-wine/out` by default. Wine cannot show real speech, UIA/IA2 semantics, Win+H voice typing, the Codex
 Windows sandbox, a real Codex or Claude Code sign-in, or a real GitHub update download.

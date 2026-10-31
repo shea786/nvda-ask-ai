@@ -56,32 +56,39 @@ Step 3: Sign in
 1. Press NVDA+N, then P for Preferences, then S for Settings.
 2. In the Categories list, go to "Ask AI" and press Tab.
 3. "Default AI service" (Alt+V) is the service new conversations use.
-   "Account settings for" (Alt+G) chooses which service the next controls
-   belong to: pick ChatGPT (Codex) or Claude (Claude Code).
+   "Show settings for service" (Alt+G) chooses which service the group
+   "<service> account and defaults" shows: ChatGPT (Codex) or Claude
+   (Claude Code). NVDA then says its status once.
 4. Press "Sign in to ChatGPT" or "Sign in to Claude" (Alt+S).
 5. Your web browser opens. Sign in and approve.
 6. Go back to NVDA Settings (Alt+Tab until you hear it). NVDA tells you
    when you are signed in. Repeat steps 3 to 6 for the other service if
    you have both. Press OK.
 If the browser does not open, use "Copy sign-in link" (Alt+Y) and paste
-the link into your browser's address bar. For Claude the page then shows
-a code: copy it, come back and press "Enter sign-in code" (the button
-right after Copy sign-in link), paste it and press Enter.
+the link into your browser's address bar. For Claude a box for the code
+opens by itself: when the page shows a code, copy it, come back, paste it
+into the box and press Enter.
 
 Step 4: Ask a question
 ----------------------
 - Press NVDA+Alt+G. Type a question and press Enter.
 - You hear soft beeps while it works, then NVDA reads the answer.
-- AI service (Alt+S) switches this conversation between ChatGPT and
-  Claude; NVDA says "Now using Claude". Model (Alt+M) and Reasoning
-  effort (Alt+E) follow the service.
+- Conversation options (Alt+P) holds the AI service, model, reasoning
+  effort and project folder. Nothing changes until OK; NVDA then says e.g.
+  "Claude, Opus, medium effort, no project folder." Alt+S, Alt+M, Alt+E
+  and Alt+J open it straight on that field.
+- Tab order in the dialog: Question, Ask, Dictate, [what is attached],
+  Conversation, Copy last answer, Save answer as, Attach files,
+  Conversation options, Conversations, New conversation, Close.
 - To speak instead of typing, press Alt+D (Dictate). Windows voice typing
   starts. Speak your question, then press Enter.
 - Answers are also in the Conversation box (Alt+V), after "ChatGPT:" or
   "Claude:"; use the arrow keys to review them.
 - NVDA+Alt+Shift+G repeats the last answer from anywhere. Press it twice to
   open the answer in a window you can read.
-- Escape cancels a question that is still waiting; press it again to close.
+- Alt+C (the Ask button becomes Cancel) cancels a question that is still
+  waiting. Escape closes the dialog; the question keeps running and the
+  answer is spoken when ready.
 
 Other features
 --------------
@@ -118,11 +125,18 @@ Search, history, drafts, status, "Ask about this" and files
 - If an answer arrives while you are in another program, NVDA says
   "Done:" and the conversation name before it.
 - NVDA+Alt+A in another program (with text selected, or on any control)
-  attaches that text to your next question. The Ask AI dialog shows a
-  Context field; "Include a screenshot of the window" (Alt+U) also sends a
-  picture of that window. Password fields are refused.
-- Attach files (Alt+H) adds files to the next question; they are listed
-  under Pending attachments (Alt+P); Remove file is Alt+I.
+  attaches that text to your next question. It appears first in
+  "Attached to next question" (Alt+T); press Enter on it to read it,
+  Delete to remove it. "Include a screenshot of <window> (everything
+  visible in it)" (Alt+U) sends a picture of that window, taken when you
+  send. Password fields are refused.
+- Attach files (Alt+H) adds files to the same list; Remove item is Alt+I.
+  Screen text is cleared when you close the dialog or switch conversation;
+  files stay and NVDA says "Still attached: 2 files" when it opens again.
+- A project folder must be a folder of your own on a local drive; the
+  first time the AI could write there, Ask AI asks for permission.
+- Updates (NVDA menu, Tools, Check for Ask AI updates) offer Install,
+  What's new, Skip this version and Later.
 
 Keyboard shortcuts
 ------------------
@@ -133,7 +147,9 @@ NVDA+Alt+A          Ask about this (selected or current text)
 Up / Down           Earlier / later questions (empty Question box)
 Ctrl+S              Save draft          Ctrl+F    Find in conversation
 F3 / Shift+F3       Next / previous match
-Escape              Stop dictating, cancel the question, or close
+Escape              Stop dictating, or close (a question keeps running)
+Alt+C               Cancel a waiting question
+Alt+P               Conversation options (Alt+S/M/E/J: on that field)
 
 What to report back
 -------------------
@@ -163,7 +179,13 @@ Please send back answers to these, even if everything worked:
 13. Did NVDA+Alt+A attach the right text (from which program)? Did the
     screenshot option work, and did the AI describe the picture?
 14. Did attaching a document, a picture and a big file work?
-15. Anything confusing, silent, or spoken twice.
+15. Was the Conversation options dialog easy to use? Did the summary after
+    OK say the right service, model, effort and folder?
+16. Did "Still attached" and the status report tell you clearly what goes
+    with your next question?
+17. When dictating with Windows voice typing, does saying "new line" press
+    Enter (and send the question) or add a line break in the Question box?
+18. Anything confusing, silent, or spoken twice.
 If something goes wrong, open the NVDA menu, Tools, View log, and send the
 lines that mention Ask AI (or the whole log).
 

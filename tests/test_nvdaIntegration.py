@@ -214,6 +214,8 @@ class FakeNvdaTestCase(unittest.TestCase):
 			"announceInOtherApps": False,
 			"autoUpdateCheck": True,
 			"lastUpdateCheck": 0.0,
+			"skippedUpdateVersion": "",
+			"projectGrants": [],
 			# Migration ran already, unless a test says otherwise.
 			"migratedFromAskGPT": True,
 			"askedToRemoveAskGPT": True,
@@ -253,7 +255,7 @@ class FakeNvdaTestCase(unittest.TestCase):
 				self.assertFalse(thread.is_alive())
 
 	def useClient(self, client):
-		self.dialogs.makeClient = lambda executablePath=None, conversation=None, providerId=None: client
+		self.dialogs.makeClient = lambda executablePath=None, conversation=None, providerId=None, allowWrites=None: client
 		return client
 
 	def _conversation(self, *messages, **kwargs):
@@ -287,6 +289,8 @@ class TestPluginWithFakeNvda(FakeNvdaTestCase):
 				"announceInOtherApps",
 				"autoUpdateCheck",
 				"lastUpdateCheck",
+				"skippedUpdateVersion",
+				"projectGrants",
 				"migratedFromAskGPT",
 				"askedToRemoveAskGPT",
 			},
@@ -568,7 +572,7 @@ class TestPluginWithFakeNvda(FakeNvdaTestCase):
 		client = self.useClient(FakeClient(answer="I saved report.docx.", onAsk=createFiles))
 		conversation = self._conversation(projectFolder=project)
 		dialogs.state.current = conversation
-		dialogs.startRequest("Write a report", conversation)
+		dialogs.startRequest("Write a report", conversation, allowWrites=True)
 		self.waitForRequests()
 		self.assertIn("The current working directory is the user's project folder.", client.prompts[0])
 		self.assertEqual(self.spoken[-2:], ["I saved report.docx.", "Created: report.docx. Changed: existing.txt"])
@@ -680,7 +684,7 @@ class TestServicesWithFakeNvda(FakeNvdaTestCase):
 		self.useClient(client)
 		conversation = self._conversation(provider="claude", projectFolder=self.tempDir)
 		dialogs.state.current = conversation
-		pending = dialogs.startRequest("Say hello", conversation)
+		pending = dialogs.startRequest("Say hello", conversation, allowWrites=True)
 		self.assertEqual(pending.providerId, "claude")
 		self.waitForRequests()
 		self.assertEqual(self.spoken[-1], "Bonjour")
@@ -791,29 +795,43 @@ class TestServicesWithFakeNvda(FakeNvdaTestCase):
 		self.assertEqual((loaded.title, loaded.provider, loaded.messages[0]["provider"]), ("Old", "codex", "codex"))
 
 	def test_offerToRemoveOldAddon(self):
-		package = self.package
+		# A-M5: asked when Ask AI is first opened; recorded only after an explicit Yes or No.
+		dialogs = self.dialogs
 		gui = self.fakeModules["gui"]
 		gui.mainFrame.prePopup = gui.mainFrame.postPopup = lambda: None
+		gui.addonGui = _module("gui.addonGui", promptUserForRestart=lambda: None)
 		old = mock.Mock()
 		old.name, old.isEnabled, old.isPendingRemove = "askGPT", True, False
 		self.fakeModules["addonHandler"].getAvailableAddons = lambda: iter([old])
 		self.conf["askedToRemoveAskGPT"] = False
 		questions = []
-		with mock.patch.object(self.dialogs, "askYesNo", lambda message, title, parent=None: questions.append(message) or False):
-			package.offerToRemoveOldAddon()
-			package.offerToRemoveOldAddon()
-		self.assertEqual(questions, ["The old Ask GPT add-on is still installed. Remove it now? (Restart NVDA afterwards.)"])
+
+		def answer(value):
+			return lambda message, title, parent=None: questions.append(message) or value
+
+		with mock.patch.object(dialogs, "askYesNoOrLater", answer(None)):
+			self.package.offerToRemoveOldAddon()
+		self.assertFalse(self.conf["askedToRemoveAskGPT"], "Escape: ask again next time")
+		with mock.patch.object(dialogs, "askYesNoOrLater", answer(False)):
+			dialogs.offerToRemoveOldAddon()
+			dialogs.offerToRemoveOldAddon()
+		self.assertEqual(len(questions), 2, "not asked again after No")
+		self.assertEqual(questions[0], "The old Ask GPT add-on is still installed. Remove it now? (Restart NVDA afterwards.)")
 		old.requestRemove.assert_not_called()
-		self.assertTrue(self.conf["askedToRemoveAskGPT"], "never asked again after No")
+		self.assertTrue(self.conf["askedToRemoveAskGPT"])
 		self.conf["askedToRemoveAskGPT"] = False
-		with mock.patch.object(self.dialogs, "askYesNo", lambda *a, **k: True):
-			package.offerToRemoveOldAddon()
+		with mock.patch.object(dialogs, "askYesNoOrLater", answer(True)):
+			dialogs.offerToRemoveOldAddon()
 		old.requestRemove.assert_called_once_with()
+		source = open(os.path.join(helpers.PACKAGE_DIR, "dialogs.py"), encoding="utf-8").read()
+		openFunction = source[source.index("def openAskDialog():"):source.index("def openAskDialogWithContext(")]
+		self.assertIn("offerToRemoveOldAddon(gui.mainFrame)", openFunction, "asked when Ask AI is opened, not on a timer")
+		self.assertNotIn("OLD_ADDON_PROMPT_DELAY_MS", open(os.path.join(helpers.PACKAGE_DIR, "__init__.py"), encoding="utf-8").read())
 
 	def test_noPromptWithoutTheOldAddon(self):
 		self.fakeModules["addonHandler"].getAvailableAddons = lambda: iter([])
 		self.conf["askedToRemoveAskGPT"] = False
-		with mock.patch.object(self.dialogs, "askYesNo", side_effect=AssertionError("asked")):
+		with mock.patch.object(self.dialogs, "askYesNoOrLater", side_effect=AssertionError("asked")):
 			self.package.offerToRemoveOldAddon()
 		self.assertFalse(self.conf["askedToRemoveAskGPT"])
 
@@ -862,7 +880,7 @@ class TestRound6(FakeNvdaTestCase):
 		self.assertFalse(os.path.exists(client.attachments.directory), "the request folder is deleted afterwards")
 		question = conversation.messages[0]
 		self.assertEqual(question["attachments"], ["screenshot.png", "data.bin", "notes.txt"])
-		self.assertEqual(question["context"], "17 characters from Word, Report.docx")
+		self.assertEqual(question["context"], "Selected text from Word, 17 characters")
 		self.assertNotIn("Quarterly", str(conversation.toDict()), "no screen content is stored")
 		self.assertIsNone(dialogs.state.pendingContext)
 		self.assertEqual(len(dialogs.state.pendingAttachments), 0)
@@ -919,7 +937,7 @@ class TestRound6(FakeNvdaTestCase):
 		dialogs.state.current = conversation
 		dialogs.startRequest("Weather today", conversation)
 		self.waitForRequests()
-		self.assertEqual(self.spoken[-1], "Done: Weather today. Sunny.")
+		self.assertEqual(self.spoken[-1], "Ask AI answer, Weather today: Sunny.")
 		error = self.codexClient.ProviderError("network", "x", provider="claude")
 		self.useClient(FakeClient(error=error))
 		dialogs.startRequest("Again", conversation)
@@ -936,7 +954,9 @@ class TestRound6(FakeNvdaTestCase):
 		dialogs.state.current = conversation
 		pending = dialogs.startRequest("Trip plans", conversation)
 		pending.startedAt = time.time() - 40
-		self.assertEqual(dialogs.currentStatus(), "Claude is answering in Trip plans, 40 seconds.")
+		self.assertEqual(dialogs.currentStatus(), "Claude, working for 40 seconds. Conversation: Trip plans.")
+		pending.startedAt = time.time()
+		self.assertEqual(dialogs.currentStatus(), "Claude, just started. Conversation: Trip plans.")
 		release.set()
 		self.waitForRequests()
 		self.assertTrue(dialogs.currentStatus().startswith("Idle. Last answer from Claude at "))
@@ -945,7 +965,7 @@ class TestRound6(FakeNvdaTestCase):
 		self.assertEqual(dialogs.currentStatus(), "Waiting for sign-in.")
 		dialogs._loginClient = None
 		dialogs.state.loginStates["claude"] = base.STATE_SIGNED_OUT
-		self.assertEqual(dialogs.currentStatus(), "Not signed in to Claude")
+		self.assertEqual(dialogs.currentStatus(), "Not signed in to Claude.")
 		# A sign-in error during a request also marks the service as signed out.
 		dialogs.state.loginStates.clear()
 		self.useClient(FakeClient(error=base.ProviderError(base.KIND_NOT_LOGGED_IN, "x", provider="claude")))
@@ -957,7 +977,7 @@ class TestRound6(FakeNvdaTestCase):
 		dialogs._activeDictation = None
 		plugin = self.package.GlobalPlugin()
 		plugin.script_reportStatus(None)
-		self.assertEqual(self.spoken[-1], "Not signed in to Claude")
+		self.assertEqual(self.spoken[-1], "Not signed in to Claude.")
 		plugin.terminate()
 
 	def _fakeAccessibility(self, focus, navigator):
@@ -1032,8 +1052,154 @@ class TestRound6(FakeNvdaTestCase):
 			source = f.read()
 		self.assertIn("SEARCH_DEBOUNCE_MS = 300", source)
 		self.assertIn("search.filterConversations(listed, self.query)", source)
-		self.assertIn('"{count} conversations match"', source)
+		self.assertIn('"{count} match; first: {title}"', source)
+		self.assertIn("wx.EVT_TEXT_ENTER, self.onSearchEnter", source)
+		self.assertIn("self.listCtrl.SetItem(index, 3, conversation.projectFolder)", source)
 		self.assertLess(source.index('_("&Search:")'), source.index('_("Con&versations:")'), "the Search field is above the list")
+
+
+class TestRound7(FakeNvdaTestCase):
+	"""Security review and accessibility audit fixes in the NVDA-facing modules."""
+
+	def setUp(self):
+		super().setUp()
+		self.attachments = sys.modules["askAI.attachments"]
+		self.context = sys.modules["askAI.context"]
+
+	def test_codexRefusesOtherFiles(self):
+		dialogs = self.dialogs
+		self.useClient(FakeClient())
+		conversation = self._conversation(provider="codex")
+		dialogs.state.current = conversation
+		data = os.path.join(self.tempDir, "data.bin")
+		with open(data, "wb") as f:
+			f.write(b"\x00\x01")
+		dialogs.state.pendingAttachments.add(data)
+		with self.assertRaises(dialogs.RequestRefused) as cm:
+			dialogs.startRequest("Read this", conversation)
+		self.assertIn("ChatGPT can only receive text files and images; Claude can read other files", cm.exception.message)
+		self.assertEqual(conversation.messages, [], "nothing was sent")
+		self.assertEqual(len(dialogs.state.pendingAttachments), 1, "the files stay attached")
+		conversation.provider = "claude"
+		dialogs.startRequest("Read this", conversation)
+		self.waitForRequests()
+
+	def test_unsafeProjectFolderIsRefusedAndDropped(self):
+		dialogs = self.dialogs
+		conversation = self._conversation(projectFolder="relative\\folder")
+		with self.assertRaises(dialogs.RequestRefused):
+			dialogs.startRequest("q", conversation)
+		message = dialogs.dropUnsafeProjectFolder(conversation)
+		self.assertIn("cannot be a project folder", message)
+		self.assertEqual(conversation.projectFolder, "")
+		self.assertEqual(dialogs.dropUnsafeProjectFolder(conversation), "")
+
+	def test_writeConsentIsAskedOnceAndStoredInConfig(self):
+		dialogs = self.dialogs
+		project = os.path.join(self.tempDir, "project")
+		os.makedirs(project)
+		conversation = self._conversation(projectFolder=project)
+		questions = []
+		with mock.patch.object(dialogs, "askYesNo", lambda message, title, parent=None: questions.append(message) or False):
+			self.assertFalse(dialogs.writeConsent(conversation))
+		self.assertEqual(questions, ["Allow the AI to create and change files in %s?" % project])
+		self.assertEqual(self.conf["projectGrants"], [], "No: read-only for this request, asked again next time")
+		with mock.patch.object(dialogs, "askYesNo", lambda *a, **k: True):
+			self.assertTrue(dialogs.writeConsent(conversation))
+		self.assertEqual(len(self.conf["projectGrants"]), 1)
+		with mock.patch.object(dialogs, "askYesNo", side_effect=AssertionError("asked again")):
+			self.assertTrue(dialogs.writeConsent(conversation))
+		self.conf["allowProjectWrites"] = False
+		self.assertFalse(dialogs.writeConsent(conversation), "the global setting still wins")
+		self.assertNotIn("grant", json.dumps(conversation.toDict()).lower(), "grants are never in the conversation file")
+
+	def test_readOnlyWithoutConsent(self):
+		dialogs = self.dialogs
+		project = os.path.join(self.tempDir, "project")
+		os.makedirs(project)
+		conversation = self._conversation(projectFolder=project)
+		client = dialogs.makeClient(conversation=conversation)
+		self.assertFalse(client.allowProjectWrites, "no consent passed: read-only")
+		self.assertTrue(dialogs.makeClient(conversation=conversation, allowWrites=True).allowProjectWrites)
+
+	def test_shutdownDeletesThePendingRequestFolder(self):
+		dialogs = self.dialogs
+		release = threading.Event()
+		self.useClient(FakeClient(release=release))
+		conversation = self._conversation(provider="claude")
+		dialogs.state.current = conversation
+		dialogs.state.pendingAttachments.addAttachment(self.attachments.textAttachment("x.txt", "x"))
+		dialogs.state.pendingContext = self.context.ScreenContext("screen", "selection", "Word", "R")
+		pending = dialogs.startRequest("q", conversation)
+		self.assertTrue(os.path.isdir(pending.plan.directory))
+		dialogs.shutdown()
+		self.assertFalse(os.path.exists(pending.plan.directory), "deleted synchronously")
+		release.set()
+		self.waitForRequests()
+
+	def test_switchingClearsScreenContextButKeepsFiles(self):
+		dialogs = self.dialogs
+		dialogs.state.current = self._conversation()
+		dialogs.state.pendingContext = self.context.ScreenContext("screen", "selection", "Word", "R")
+		dialogs.state.includeScreenshot = True
+		dialogs.state.pendingAttachments.addAttachment(self.attachments.textAttachment("x.txt", "x"))
+		self.assertTrue(dialogs.currentStatus().endswith("Context from Word and 1 file attached to the next question."))
+		dialogs.switchConversation(self._conversation())
+		self.assertIsNone(dialogs.state.pendingContext)
+		self.assertFalse(dialogs.state.includeScreenshot)
+		self.assertEqual(len(dialogs.state.pendingAttachments), 1)
+		self.assertEqual(dialogs.currentStatus(), "Idle. 1 file attached to the next question.")
+
+	def test_optionsSummary(self):
+		dialogs = self.dialogs
+		conversation = self._conversation(provider="claude", model="opus", reasoningEffort="medium")
+		self.assertEqual(dialogs.optionsSummary(conversation), "Claude, Opus, medium effort, no project folder.")
+		conversation.model = ""
+		conversation.projectFolder = "/home/jo/Letters"
+		self.assertEqual(
+			dialogs.optionsSummary(conversation),
+			"Claude, default model, medium effort, project folder /home/jo/Letters.",
+		)
+
+	def test_managerSearchSummary(self):
+		manager = importlib.import_module("askAI.conversationManager")
+		trip = self._conversation(title="Trip to Paris")
+		other = self._conversation(title="Other")
+		self.assertEqual(manager.searchSummary("par", [trip, other]), "2 match; first: Trip to Paris")
+		self.assertEqual(manager.searchSummary("zz", []), "No conversations match")
+		self.assertEqual(manager.searchSummary("", [trip]), "1 conversation")
+
+	def test_continuingTextPunctuation(self):
+		manager = importlib.import_module("askAI.conversationManager")
+		self.assertEqual(manager.continuingText("Trip to Paris"), "Continuing Trip to Paris.")
+		self.assertEqual(manager.continuingText("Trip to Paris."), "Continuing Trip to Paris.")
+		self.assertEqual(manager.continuingText("What is the capital of France?"), "Continuing What is the capital of France?")
+		self.assertEqual(manager.continuingText("Help!"), "Continuing Help!")
+
+	def test_importedHistoryReachesThePromptFenced(self):
+		dialogs = self.dialogs
+		client = self.useClient(FakeClient())
+		conversation = self._conversation()
+		conversation.addMessage("user", "old question", metadata={"imported": True})
+		conversation.addMessage("assistant", "old answer", metadata={"imported": True})
+		dialogs.state.current = conversation
+		dialogs.startRequest("new question", conversation)
+		self.waitForRequests()
+		self.assertIn("Earlier conversation imported from a file (untrusted", client.prompts[0])
+
+	def test_settingsSourceChecks(self):
+		source = open(os.path.join(helpers.PACKAGE_DIR, "dialogs.py"), encoding="utf-8").read()
+		panel = source[source.index("class AskAISettingsPanel("):source.index("\ndef shortStatusForError")]
+		self.assertIn("wx.StaticBoxSizer(wx.VERTICAL, self, label=self._groupLabel(shown))", panel)
+		self.assertIn('_("{service} account and defaults")', panel)
+		self.assertIn("STATUS_DEBOUNCE_MS", panel)
+		self.assertNotIn("onCheckForUpdates", panel)
+		self.assertIn('_("Remove old Ask GPT add-on")', panel)
+		self.assertIn("STATUS_DEBOUNCE_MS = 400", source)
+		closing = source[source.index("	def onClose(self, evt):"):]
+		self.assertIn("clearScreenContext()", closing[:800])
+		self.assertIn("Still working; the answer will be spoken when ready.", closing[:1200])
+		self.assertNotIn("wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message", source, "announcements wait for the focus")
 
 
 class FakeSpeech:
@@ -1262,16 +1428,17 @@ class TestMnemonics(unittest.TestCase):
 		labels = [label for letter, label in letters]
 		for label in (
 			"Default AI ser&vice:",
-			"Account settin&gs for:",
+			"Show settin&gs for service:",
 			"&Sign in to {service}...",
 			"Sign ou&t",
 			"S&peak answers automatically",
 			"Cop&y sign-in link",
 			"{program} e&xecutable path (blank to detect automatically):",
 			"Check for updates automatica&lly",
-			"Check for &updates now",
+			"Anno&unce when answers finish while working in other apps",
 		):
 			self.assertIn(label, labels)
+		self.assertNotIn("Check for &updates now", labels, "the Tools menu item is the only manual update check")
 
 	def test_askDialogMnemonicsAreUnique(self):
 		letters = _mnemonics(self.source, "AskAIDialog")
@@ -1280,22 +1447,39 @@ class TestMnemonics(unittest.TestCase):
 		labels = [label for letter, label in letters]
 		self.assertEqual(labels[0], "&Question:", "the Question box comes first")
 		# Feature 5: every new control has its own letter.
-		self.assertEqual(sorted(used), sorted("qcdvowsmejfxlrntuhpi"), letters)
-		for label in (
-			"Save ans&wer as...",
-			"AI &service:",
-			"&Model:",
-			"Reasoning &effort:",
-			"Pro&ject folder:",
-			"Choose project &folder...",
-			"Open folder in E&xplorer",
-			"C&lear project folder",
-			"Conve&rsations...",
-			"&New conversation",
-		):
-			self.assertIn(label, labels)
-		# The service choice comes right before the model choice.
-		self.assertEqual(labels[labels.index("AI &service:") + 1], "&Model:")
+		# A-M1: the main dialog is simpler; S, M, E and J are hidden accelerators that open Conversation options.
+		self.assertEqual(sorted(used), sorted("qcdtivowhprn"), letters)
+		order = [label for label in labels if "&" in label]
+		self.assertEqual(
+			order[:12],
+			[
+				"&Question:",
+				"&Ask",
+				"&Dictate (Windows voice typing)",
+				"Attached to next ques&tion:",
+				"Remove &item",
+				"Con&versation:",
+				"C&opy last answer",
+				"Save ans&wer as...",
+				"Attac&h files...",
+				"Conversation o&ptions...",
+				"Conve&rsations...",
+				"&New conversation",
+			],
+			"the main tab order",
+		)
+		self.assertIn('("S", ConversationOptionsDialog.FOCUS_SERVICE)', self.source)
+		self.assertIn('("M", ConversationOptionsDialog.FOCUS_MODEL)', self.source)
+		self.assertIn('("E", ConversationOptionsDialog.FOCUS_EFFORT)', self.source)
+		self.assertIn('("J", ConversationOptionsDialog.FOCUS_PROJECT)', self.source)
+		hidden = set("smej")
+		self.assertFalse(hidden & set(used), "hidden accelerators never clash with a visible letter")
+		self.assertIn("Incl&ude a screenshot of {window} (everything visible in it)", self.source)
+
+	def test_optionsDialogMnemonics(self):
+		letters = _mnemonics(self.source, "ConversationOptionsDialog")
+		used = [letter for letter, label in letters]
+		self.assertEqual(sorted(used), sorted("smejfxl"), letters)
 
 	def test_settingsPanelHasTheNewSettings(self):
 		labels = [label for letter, label in _mnemonics(self.source, "AskAISettingsPanel")]

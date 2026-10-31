@@ -14,9 +14,15 @@ import uuid
 # 1: Ask GPT 1.1 (Codex only). 2: adds "provider" (and "provider" on assistant messages).
 # 3: adds "draft" (the unsent Question text) and, on questions, "attachments" (file names) and "context"
 # (a summary of attached screen text). Older files load with an empty draft and no metadata.
-SCHEMA_VERSION = 3
+# 4: adds "serviceSettings" ({service: {"model", "effort"}}, so switching back restores them) and, on messages
+# that came from an imported file, "imported": true (sent to the AI fenced, as untrusted earlier text).
+SCHEMA_VERSION = 4
 # Metadata keys a message may carry, with their types.
-MESSAGE_METADATA = {"attachments": list, "context": str}
+MESSAGE_METADATA = {"attachments": list, "context": str, "imported": bool}
+# Allowed clock difference before a time from a file counts as "in the future".
+FUTURE_TOLERANCE = 60
+REPLACE_ATTEMPTS = 3
+REPLACE_DELAY = 0.1
 # Conversations saved before services existed were all answered by Codex (ChatGPT).
 LEGACY_PROVIDER = "codex"
 FILE_SUFFIX = ".json"
@@ -70,6 +76,7 @@ class Conversation:
 		titleIsCustom=False,
 		provider=LEGACY_PROVIDER,
 		draft="",
+		serviceSettings=None,
 	):
 		now = time.time()
 		self.id = id or uuid.uuid4().hex
@@ -86,6 +93,13 @@ class Conversation:
 		self.provider = provider or LEGACY_PROVIDER
 		# Question text saved with Ctrl+S or when the dialog closes, restored when the conversation opens.
 		self.draft = draft or ""
+		# {service id: {"model": ..., "effort": ...}}: the choices made for each service in this conversation.
+		self.serviceSettings = {}
+		for providerId, values in (serviceSettings or {}).items():
+			if isinstance(providerId, str) and _PROVIDER.match(providerId) and isinstance(values, dict):
+				self.serviceSettings[providerId] = {
+					key: values[key] for key in ("model", "effort") if isinstance(values.get(key), str)
+				}
 
 	# Messages
 
@@ -130,6 +144,33 @@ class Conversation:
 			self.title = titleFromQuestion(firstQuestion)
 			self.titleIsCustom = False
 		self.touch()
+
+	def rememberServiceSettings(self):
+		"""Keep the current model and effort for the current service."""
+		self.serviceSettings[self.provider] = {"model": self.model, "effort": self.reasoningEffort}
+
+	def settingsFor(self, providerId):
+		"""(model, effort) last used with providerId in this conversation, or None."""
+		values = self.serviceSettings.get(providerId)
+		if not values:
+			return None
+		return values.get("model", ""), values.get("effort", "")
+
+	@property
+	def historyItems(self):
+		"""(role, text, imported) for the prompt: answered questions and their answers only."""
+		result = []
+		pending = None
+		for message in self.messages:
+			role = message.get("role")
+			if role == ROLE_USER:
+				pending = message
+			elif role == ROLE_ASSISTANT:
+				if pending is not None:
+					result.append((ROLE_USER, pending["text"], pending.get("imported") is True))
+					pending = None
+				result.append((ROLE_ASSISTANT, message["text"], message.get("imported") is True))
+		return result
 
 	@property
 	def history(self):
@@ -199,6 +240,7 @@ class Conversation:
 			"reasoningEffort": self.reasoningEffort,
 			"provider": self.provider,
 			"draft": self.draft,
+			"serviceSettings": self.serviceSettings,
 			"messages": self.messages,
 		}
 
@@ -243,9 +285,14 @@ class Conversation:
 			value = data.get(key)
 			return value if isinstance(value, str) else ""
 
+		latest = time.time() + FUTURE_TOLERANCE
+
 		def number(key):
 			value = data.get(key)
-			return float(value) if isinstance(value, (int, float)) else None
+			if not isinstance(value, (int, float)) or isinstance(value, bool):
+				return None
+			# A date in the future would keep a file at the top of the list (and make it the latest).
+			return min(float(value), latest)
 
 		return cls(
 			id=conversationId,
@@ -260,6 +307,7 @@ class Conversation:
 			titleIsCustom=data.get("titleIsCustom") is True,
 			provider=provider,
 			draft=text("draft"),
+			serviceSettings=data.get("serviceSettings") if isinstance(data.get("serviceSettings"), dict) else None,
 		)
 
 
@@ -274,7 +322,21 @@ def _cleanMetadata(metadata):
 				result[key] = names
 		elif kind is str and isinstance(value, str) and value:
 			result[key] = value
+		elif kind is bool and value is True:
+			result[key] = True
 	return result
+
+
+def replaceFile(source, target, attempts=REPLACE_ATTEMPTS, delay=REPLACE_DELAY, replace=None):
+	"""os.replace, retried briefly when Windows reports the target as in use (a reader or a sync client)."""
+	for attempt in range(attempts):
+		try:
+			(replace or os.replace)(source, target)
+			return
+		except PermissionError:
+			if attempt + 1 >= attempts:
+				raise
+			time.sleep(delay)
 
 
 def friendlyTime(timestamp, now=None, todayLabel="Today", yesterdayLabel="Yesterday"):
@@ -322,7 +384,7 @@ class ConversationStore:
 				f.write(data)
 				f.flush()
 				os.fsync(f.fileno())
-			os.replace(tempPath, path)
+			replaceFile(tempPath, path)
 		except BaseException:
 			try:
 				os.remove(tempPath)
@@ -389,13 +451,22 @@ class ConversationStore:
 		except FileNotFoundError:
 			return False
 
-	def importFile(self, path):
+	def importFile(self, path, now=None):
 		"""Copy a conversation .json into the store. If its id is taken by a different conversation,
 		it gets a new id. Returns the imported conversation. Raises ValueError/OSError for bad files.
+		The file is not trusted: its project folder is dropped (the user chooses one again), its times
+		are clamped to now, and its messages are marked imported (sent to the AI as untrusted text).
 		"""
 		with open(path, "r", encoding="utf-8") as f:
 			conversation = Conversation.fromDict(json.load(f))
+		now = time.time() if now is None else now
 		conversation.archived = False
+		conversation.projectFolder = ""
+		conversation.draft = ""
+		conversation.created = min(conversation.created, now)
+		conversation.updated = min(conversation.updated, now)
+		for message in conversation.messages:
+			message["imported"] = True
 		existing = self.load(conversation.id)
 		if existing is not None and existing.toDict() != conversation.toDict():
 			conversation.id = uuid.uuid4().hex

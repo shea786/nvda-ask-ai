@@ -52,7 +52,9 @@ Ask AI needs Claude Code 2.1.259 or later; <code>claude update</code> updates it
 <ol>
 <li>Install this add-on (open the <code>askAI-1.2.0.nvda-addon</code> file), and restart NVDA when asked.</li>
 <li>Open the NVDA menu (NVDA+N), then choose Preferences, then Settings, and select the <strong>Ask AI</strong> category.</li>
-<li>In <strong>Account settings for</strong> (Alt+G), choose ChatGPT (Codex) or Claude (Claude Code). The controls below it then belong to that service.</li>
+<li>In <strong>Show settings for service</strong> (Alt+G), choose ChatGPT (Codex) or Claude (Claude Code). The controls in the group below it,
+"ChatGPT account and defaults" or "Claude account and defaults", then belong to that service. About half a second after you stop on a service,
+NVDA says its status once, for example "Claude: Signed in with Claude".</li>
 <li>Press <strong>Sign in to ChatGPT</strong> or <strong>Sign in to Claude</strong> (Alt+S). NVDA says "Your browser will open. Sign in with your
 ChatGPT account (or Claude account), then come back to NVDA. NVDA will tell you when you are signed in." Your web browser then opens the sign-in page.
 Sign in as usual. The page may ask for a verification code sent by e-mail or text message, a two-factor authentication code,
@@ -60,14 +62,15 @@ or a "verify you are human" check (CAPTCHA). If a CAPTCHA is hard to solve with 
 <li>When the browser says you are signed in, go back to NVDA: press Alt+Tab repeatedly until you hear "NVDA Settings".
 NVDA announces "Signed in with ChatGPT" or "Signed in with Claude" by itself. You can also press <strong>Check status</strong>.
 If you do not finish within about 5 minutes, NVDA says "Sign-in was not completed. Press Sign in to try again."</li>
-<li>To use both services, choose the other one in Account settings for and sign in again.
+<li>To use both services, choose the other one in Show settings for service and sign in again.
 <strong>Default AI service</strong> (Alt+V) decides which service new conversations use.</li>
 <li>Press OK to close the settings.</li>
 </ol>
 <p><strong>If the browser did not open</strong>: press <strong>Copy sign-in link</strong> (Alt+Y) in the Ask AI settings
 right after pressing Sign in, then open your browser, press Alt+D or Control+L to move to the address bar, paste with Control+V and press Enter.
-For ChatGPT that is all. For Claude, the page shows a code at the end: copy it, go back to NVDA Settings and press
-<strong>Enter sign-in code</strong> (right after Copy sign-in link), paste the code and press Enter.
+For ChatGPT that is all. For Claude, the page shows a code at the end. Claude Code waits for it, so after you copy the link
+Ask AI opens a box for the code by itself: copy the code from the page, go back to NVDA Settings, paste it into the box and press Enter.
+You can also press <strong>Enter sign-in code</strong> (right after Copy sign-in link) at any time while signing in.
 You can also open a command prompt and type <code>codex login</code> or <code>claude auth login</code>.</p>
 <p>If the Status says <strong>Signed in with an API key, which is billed per use</strong>, the program is signed in to a pay-per-use API account
 instead of your subscription: press Sign out, then sign in again. Ask AI never passes API keys from environment variables
@@ -76,33 +79,45 @@ instead of your subscription: press Sign out, then sign in again. Ask AI never p
 <h2>Asking a question</h2>
 <ol>
 <li>Press <strong>NVDA+Alt+G</strong> from anywhere, or choose NVDA menu, Tools, Ask AI. The Ask AI dialog opens with the cursor in the Question box.
-It continues your most recent conversation, even after restarting NVDA. The window title says which conversation it is.</li>
+It continues your most recent conversation, even after restarting NVDA. The window title says the conversation and the service,
+for example "Ask AI – Trip to Paris – Claude".</li>
 <li>Type your question and press <strong>Enter</strong> to send it. To start a new line inside the question instead, press Shift+Enter.</li>
 <li>NVDA says "Asking ChatGPT" or "Asking Claude" and plays a soft beep every two seconds while waiting (you can turn the beep off in the settings).
 Answers usually take 5 to 30 seconds.</li>
 <li>When the answer arrives, NVDA reads it. It is also added to the Conversation box, after "ChatGPT:" or "Claude:".</li>
 <li>Type a follow-up question and press Enter. The AI remembers the earlier questions of this conversation.</li>
 </ol>
-<p>While waiting, press <strong>Escape</strong> (or the Cancel button, Alt+C) to cancel the question. When nothing is pending, Escape closes the dialog.
-If you close the dialog with the Close button while the AI is still working, the question keeps running, and NVDA speaks the answer when it is ready.
+<p>While waiting, the Ask button becomes <strong>Cancel</strong>: press Alt+C to cancel the question. That is the only way to cancel.
+<strong>Escape</strong> (or Close) closes the dialog and the question keeps running; NVDA says "Still working; the answer will be spoken when ready."
 The answer is always stored in the conversation where you asked the question, even if you switch to another conversation meanwhile.</p>
 
 <h2>The Ask AI dialog</h2>
 <p>Press Tab to move through the controls in this order:</p>
-<ul>
-<li><strong>Question</strong> (Alt+Q), then <strong>Ask</strong> (Alt+A; while waiting it becomes Cancel, Alt+C) and <strong>Dictate</strong> (Alt+D).</li>
-<li>Only while screen text is attached (see "Ask about this"): <strong>Context</strong>, a read-only summary such as
-"1,240 characters from Microsoft Word, Report.docx", <strong>Remove context</strong> (Alt+T) and
-<strong>Include a screenshot of the window</strong> (Alt+U, off by default).</li>
-<li><strong>Attach files</strong> (Alt+H), the list of <strong>Pending attachments</strong> (Alt+P) and <strong>Remove file</strong> (Alt+I).</li>
-<li><strong>Conversation</strong> (Alt+V): the questions and answers so far.</li>
-<li><strong>Copy last answer</strong> (Alt+O) and <strong>Save answer as</strong> (Alt+W).</li>
-<li><strong>AI service</strong> (Alt+S): ChatGPT (Codex) or Claude (Claude Code) for this conversation. NVDA says, for example, "Now using Claude".</li>
-<li><strong>Model</strong> (Alt+M) and <strong>Reasoning effort</strong> (Alt+E) for this conversation; both lists follow the service.</li>
-<li><strong>Project folder</strong> (Alt+J, shows "None" when there is none), <strong>Choose project folder</strong> (Alt+F),
-<strong>Open folder in Explorer</strong> (Alt+X) and <strong>Clear project folder</strong> (Alt+L).</li>
-<li><strong>Conversations</strong> (Alt+R), <strong>New conversation</strong> (Alt+N) and Close.</li>
-</ul>
+<ol>
+<li><strong>Question</strong> (Alt+Q)</li>
+<li><strong>Ask</strong> (Alt+A); while waiting it is <strong>Cancel</strong> (Alt+C)</li>
+<li><strong>Dictate</strong> (Alt+D)</li>
+<li>Only when something is attached to the next question: the list <strong>Attached to next question</strong> (Alt+T),
+<strong>Remove item</strong> (Alt+I), and, when screen text is attached,
+<strong>Include a screenshot of</strong> the window's title <strong>(everything visible in it)</strong> (Alt+U, off by default).
+See "What is attached, and when it is cleared".</li>
+<li><strong>Conversation</strong> (Alt+V): the questions and answers so far</li>
+<li><strong>Copy last answer</strong> (Alt+O)</li>
+<li><strong>Save answer as</strong> (Alt+W)</li>
+<li><strong>Attach files</strong> (Alt+H)</li>
+<li><strong>Conversation options</strong> (Alt+P)</li>
+<li><strong>Conversations</strong> (Alt+R)</li>
+<li><strong>New conversation</strong> (Alt+N)</li>
+<li>Close</li>
+</ol>
+<p><strong>Conversation options</strong> opens a small dialog with the conversation's <strong>AI service</strong> (Alt+S),
+<strong>Model</strong> (Alt+M), <strong>Reasoning effort</strong> (Alt+E), <strong>Project folder</strong> (Alt+J) with
+<strong>Choose project folder</strong> (Alt+F), <strong>Open folder in Explorer</strong> (Alt+X) and <strong>Clear project folder</strong> (Alt+L),
+and OK and Cancel. Nothing changes until you press OK; NVDA then says one summary, for example
+"Claude, Opus, medium effort, no project folder." The model and effort are remembered for each service in the conversation,
+so switching back to a service brings its choices back.
+From the Ask AI dialog, <strong>Alt+S</strong>, <strong>Alt+M</strong>, <strong>Alt+E</strong> and <strong>Alt+J</strong> still work:
+they open Conversation options on that field.</p>
 
 <h2>Finding text in a conversation</h2>
 <p>Press <strong>Ctrl+F</strong> anywhere in the Ask AI dialog, type what to find and press Enter. The search ignores upper and lower case.
@@ -112,51 +127,78 @@ after the last match NVDA says "Wrapped to first match". With no match NVDA says
 Ctrl+F offers your last search again.</p>
 <p>To search all conversations, open the conversation manager (Alt+R) and type in its <strong>Search</strong> field (Alt+S).
 The list keeps only conversations whose title or text contains your words, about a third of a second after you stop typing,
-and NVDA says, for example, "3 conversations match". Tick Show archived to search archived conversations too.</p>
+and NVDA says, for example, "3 match; first: Trip to Paris". Press Enter to continue the first match at once.
+Tick Show archived to search archived conversations too.</p>
 
 <h2>Earlier questions and drafts</h2>
 <ul>
 <li>In an empty Question box, press <strong>Up</strong> to bring back your earlier questions, newest first: first those of this conversation,
 then your other recent questions. <strong>Down</strong> goes forward again. NVDA reads each one. Past the ends NVDA says "No earlier question"
-or "No later question" and gives back what you had typed. As soon as you edit a recalled question, Up and Down move inside the text again.
+or "No later question" and gives back what you had typed. In a recalled question of several lines, Up and Down first move through its lines:
+Up recalls the next one only from the first line, Down only from the last line. As soon as you edit a recalled question, Up and Down move inside the text again.
 Ask AI keeps your last 100 questions in <code>%LOCALAPPDATA%\askAI\history.json</code>, not in the NVDA settings.</li>
 <li><strong>Ctrl+S</strong> saves the Question text as the conversation's <strong>draft</strong> ("Draft saved").
 The draft is also saved silently when you close the dialog or switch conversations, and comes back when you open or continue
-the conversation ("Draft restored"). Sending the question clears it.</li>
+the conversation: "Continuing Trip to Paris. Draft restored." Sending the question clears it.</li>
 </ul>
 
 <h2>Status report and announcements</h2>
-<p>Press <strong>NVDA+Alt+Shift+S</strong> from anywhere to hear what Ask AI is doing, for example
-"Claude is answering in Trip to Paris, 40 seconds.", "Dictating.", "Waiting for sign-in.",
-"Not signed in to Claude" or "Idle. Last answer from ChatGPT at 3:05 PM in Trip to Paris.".
-It never starts a program; the sign-in state is the one Ask AI last saw.</p>
-<p>When an answer arrives while you work in another app (the Ask AI dialog is not in front), NVDA says "Done:" and the conversation title
-before the answer, or "Failed:", the title and the reason. Turn this off with "Announce when answers finish while working in other apps" in the settings.</p>
+<p>Press <strong>NVDA+Alt+Shift+S</strong> from anywhere to hear what Ask AI is doing. It never starts a program; the sign-in state is the one
+Ask AI last saw. It says one of:</p>
+<ul>
+<li>"ChatGPT, working for 40 seconds. Conversation: Trip to Paris." ("just started" in the first second)</li>
+<li>"Dictating."</li>
+<li>"Waiting for sign-in."</li>
+<li>"Not signed in to Claude." when the current conversation's service was last seen signed out</li>
+<li>"Idle. Last answer from ChatGPT at 15:05 in Trip to Paris." (the time in your Windows time format)</li>
+<li>"Idle." when there is no answer yet</li>
+</ul>
+<p>followed, when something waits for the next question, by for example
+"Context from Word and 2 files attached to the next question."</p>
+<p>When an answer arrives while you work in another app (the Ask AI dialog is not in front), NVDA says "Ask AI answer," the conversation
+title and a colon before the answer, for example "Ask AI answer, Trip to Paris: ...". A failure is "Failed:", the title and the reason.
+Turn this off with "Announce when answers finish while working in other apps" (Alt+U) in the settings.</p>
 
 <h2>Ask about this</h2>
 <p>Select text in any program, or move the navigator to something, and press <strong>NVDA+Alt+A</strong>.
 Ask AI takes the selected text, or else the name, value and text of the navigator object (up to 20,000 characters), together with
-the program and window names. The Ask AI dialog opens on your current conversation with a <strong>Context</strong> field such as
-"1,240 characters from Microsoft Word, Report.docx", and NVDA says "Context attached from Microsoft Word. Type your question."
-The text is sent with your next question only, marked as text from your screen that the AI must treat as data, not as instructions.
-The conversation keeps only the summary, not the text. <strong>Remove context</strong> (Alt+T) takes it off again.</p>
-<p>Tick <strong>Include a screenshot of the window</strong> (Alt+U) to also send a picture of the window as it was when you pressed NVDA+Alt+A.
-ChatGPT receives it as an image; Claude opens it with its file reading tool. The picture is saved only in a private folder for that
-question and deleted afterwards.</p>
+the program and window names. The Ask AI dialog opens on your current conversation and NVDA says what was attached, for example
+"Attached: Selected text from Word, 1,240 characters. Type your question." or
+"Attached: Text of the current object (document) from Edge, cut to 20,000 characters. Type your question."
+The same line is the first item of <strong>Attached to next question</strong>; press Enter on it to read the captured text in a window,
+with the arrow keys, before you send it. Delete (or Remove item) takes it off again.</p>
+<p>The text is sent with your next question only, in a block marked as text from your screen that the AI must treat as data, not as instructions.
+The conversation keeps only the summary, not the text.</p>
+<p><strong>Include a screenshot of</strong> ... <strong>(everything visible in it)</strong> (Alt+U), named after the window, sends a picture of that window too.
+The picture is taken when you send the question, not before, and only if the box is ticked; the window draws itself
+(PrintWindow), so the Ask AI dialog in front of it is not in the picture. If the window was closed meanwhile, Ask AI says so and does not send.
+Pictures are made at most 4,096 pixels wide or high. If the picture is nearly all one colour, Ask AI asks
+"Screenshot looks blank, possibly because Screen Curtain is on. Send it anyway?" so you can cancel and turn Screen Curtain off first.
+ChatGPT receives the picture as an image; Claude opens it with its file reading tool. It is saved only in a private folder for that question,
+deleted afterwards.</p>
 <p>Ask about this refuses password and other protected fields ("Can't use protected or password fields"), and does nothing on secure screens.</p>
 
 <h2>Attaching files</h2>
 <p>Press <strong>Attach files</strong> (Alt+H) and choose one or more files (hold Control to select several). NVDA says, for example, "2 files attached",
-and they appear in <strong>Pending attachments</strong>, where <strong>Remove file</strong> (Alt+I) removes the selected one. They go with the next question only.</p>
+and they appear in <strong>Attached to next question</strong> (Alt+T), as "notes.txt, text, 1 KB". Delete or <strong>Remove item</strong> (Alt+I) removes the selected one.</p>
 <ul>
 <li><strong>Pictures</strong> (png, jpg, jpeg, gif, webp, up to 10 MB each) are sent as images, like the screenshot.</li>
 <li><strong>Text files</strong> (UTF-8, up to 200 KB each and 500 KB together) are put into the question.</li>
-<li><strong>Other files</strong>, and bigger ones up to 25 MB, are copied into a private folder that the AI may read for that question;
-the folder is deleted afterwards. Larger files are refused with a message.</li>
+<li><strong>Other files</strong>, and bigger ones up to 25 MB, can only be read by <strong>Claude</strong>: they are copied into a private folder that
+Claude may read for that question, deleted afterwards. For ChatGPT, Ask AI refuses to send them:
+"ChatGPT can only receive text files and images; Claude can read other files." Files over 25 MB are refused.</li>
 <li>A question longer than 32,000 characters (for example a long paste) is sent as an attached file, question.txt; NVDA says "Long text attached as a file".</li>
 </ul>
-<p>The conversation keeps the names of attached files, not their content.
-With Claude, attached files give Claude its file reading tool for that question, limited to the private folder (and the project folder, if any).</p>
+<p>The conversation keeps the names of attached files, not their content.</p>
+
+<h2>What is attached, and when it is cleared</h2>
+<ul>
+<li>Screen text from Ask about this and the screenshot choice are for the next question only. They are cleared when you send,
+when you close the Ask AI dialog, start a New conversation or switch to another conversation, so they never ride along silently.</li>
+<li>Attached files also go with the next question only and are cleared when it is sent. If you close the dialog first they stay,
+and NVDA says "Still attached: 2 files" whenever the dialog opens or comes back to the front.</li>
+<li>The status report (NVDA+Alt+Shift+S) always says what is attached.</li>
+</ul>
 
 <h2>Stopping and replaying answers</h2>
 <ul>
@@ -199,39 +241,43 @@ Use Word or plain text for those languages.</li>
 </ul>
 
 <h2>Project folders: letting the AI read and create files</h2>
-<p>Each conversation can have a project folder, for example a folder with your notes or documents.
-Press <strong>Choose project folder</strong> (Alt+F) and pick the folder; NVDA says its name.
-With a project folder, the AI works inside that folder: it can read the files there, and (if the setting
-"Allow the AI to create and edit files in the project folder" is on, which is the default) create new files there.
-The AI tells you the file name, and NVDA also says "Created: cover letter.docx" (or "Changed: ...") after the answer.
-These lines are also added to the Conversation box.
+<p>Each conversation can have a project folder, for example a folder with your notes or documents. Open <strong>Conversation options</strong>
+(Alt+P, or Alt+J straight to the folder), press <strong>Choose project folder</strong> (Alt+F) and pick the folder.</p>
+<p><strong>Which folders are allowed.</strong> A project folder must be a folder of your own on a fixed local drive. Ask AI refuses, with the reason,
+network paths (\\server\share and device paths), removable, network and CD drives, whole drives such as C:\, your user folder itself,
+anything inside AppData (where programs keep their settings, including Ask AI's own data), the Startup folders, and the Windows, Program Files and
+ProgramData folders. The check looks only at the path before anything opens it, so a network path is never contacted. Conversation files can be
+imported or synced, so a project folder from a file is checked again whenever the conversation is opened or used, and removed (with a message) if it
+is not allowed.</p>
+<p><strong>Permission to write.</strong> The first time a conversation uses a folder while "Allow the AI to create and edit files in the project folder"
+is on, Ask AI asks once: "Allow the AI to create and change files in" the folder? Yes is remembered for that folder in the NVDA settings
+(not in the conversation file); No makes that question read-only and you are asked again next time.
+After an answer, NVDA says which files were created or changed ("Created: cover letter.docx"); it compares files up to three folder levels deep,
+including hidden ones, and says "Many files changed or the folder is too large to list the changes" for very large folders.
 Open folder in Explorer (Alt+X) opens the folder; Clear project folder (Alt+L) removes it from the conversation (no files are deleted).
-<strong>Only choose project folders you are happy for the AI to change, and keep a backup of important files.</strong>
-If you prefer the AI to only read your files, turn off "Allow the AI to create and edit files in the project folder" in the settings.</p>
-<p><strong>With ChatGPT (Codex)</strong>, Codex is told not to change or delete existing files unless you ask, and it runs in Codex's own
-"workspace-write" sandbox: it may write only inside the project folder, it has no internet access while working on files,
-and the .git, .codex and .agents folders stay read-only. Codex can also make Word or PDF files, for example "Write my cover letter as a Word document".
-The add-on never uses Codex's "bypass sandbox" mode.
-On Windows this sandbox is Codex's Windows sandbox. How strong it is depends on your Windows version and Codex version:
-on Windows 11 24H2 or later Codex can use a built-in Windows isolation feature, while older systems use a weaker fallback that
-may need a one-time administrator setup by Codex. The Codex documentation does not say what happens when no Windows sandbox is set up.
-Without a project folder, Codex always runs read-only in an empty private folder.</p>
+<strong>Only choose project folders you are happy for the AI to change, and keep a backup of important files.</strong></p>
+<p><strong>With ChatGPT (Codex)</strong>, Codex's shell (its only way to open or change files) is switched on only when writing is allowed.
+It then runs in Codex's "workspace-write" sandbox: it may write only inside the project folder, it has no internet access while working on files,
+and the .git, .codex and .agents folders stay read-only. Codex can then make Word or PDF files, for example "Write my cover letter as a Word document".
+On Windows this sandbox is Codex's Windows sandbox; how strong it is depends on your Windows and Codex versions, and the Codex documentation does not say
+what happens when no Windows sandbox is set up. Without permission to write, and without a project folder, Codex gets no shell at all,
+so it cannot open files in the project folder: paste or attach the text, or use Claude.</p>
 <p><strong>With Claude (Claude Code)</strong>, there is no operating-system sandbox on Windows. Instead the add-on only gives Claude the file tools
 Read, Glob and Grep (to read and search) and, when writing is allowed, Write and Edit. Claude Code keeps these tools inside the project folder.
 Claude gets no tool to run commands or programs and no web access, and the folder's own Claude Code settings are ignored.
 Because Claude cannot run programs, it can only create text-based files, such as Markdown (.md), web pages (.html) or CSV;
 for a Word or PDF document, ask for the text and use <strong>Save answer as</strong>, or ask Claude to write Markdown or HTML.
-Without a project folder, Claude has no tools at all.</p>
+Without a project folder, Claude has no tools at all, except reading the private folder of the files you attached.</p>
 
 <h2>Models</h2>
-<p>The <strong>Model</strong> choice (Alt+M) lists the models of the conversation's service.
+<p>The <strong>Model</strong> choice in Conversation options (Alt+M from the Ask AI dialog) lists the models of the conversation's service.
 For ChatGPT, the list is the models Codex offers to your account, taken from Codex's own list
 (the file models_cache.json in the .codex folder of your user profile, which Codex updates when it runs).
 For Claude, the list is Claude Code's model names Sonnet, Opus, Haiku and Fable (Fable only if your plan includes it).
-"Default" lets the service pick your plan's default model. When you change the model NVDA says, for example, "Model changed to Opus".
+"Default" lets the service pick your plan's default model.
 <strong>Reasoning effort</strong> (Alt+E) lists the levels the chosen model supports; lower is faster.
-The service, model and effort are remembered with each conversation. New conversations start with the defaults from the settings.
-You can type any other model name in the settings' Default model box.</p>
+The service, model and effort are remembered with each conversation, and the model and effort for each service, so switching services back and forth
+keeps them. New conversations start with the defaults from the settings. You can type any other model name in the settings' Default model box.</p>
 
 <h2>Conversations</h2>
 <p>Every conversation is saved automatically after each answer and when you change its name, service, model or project folder.
@@ -239,7 +285,8 @@ You can type any other model name in the settings' Default model box.</p>
 Press <strong>Conversations</strong> (Alt+R) in the Ask AI dialog, choose NVDA menu, Tools, Ask AI conversations,
 or assign a key to "Show Ask AI conversations" in Input gestures. The conversation manager opens with the list of conversations,
 newest first, with the current one selected. The list has the columns Title, Updated, Messages, Project and Service.
-The <strong>Search</strong> field (Alt+S) above the list filters it (see "Finding text in a conversation").</p>
+The <strong>Search</strong> field (Alt+S) above the list filters it (see "Finding text in a conversation"); Enter in it continues the first match.
+The Project column shows the full path of each conversation's project folder.</p>
 <ul>
 <li><strong>Continue</strong> (Alt+C or Enter): open the selected conversation in the Ask AI dialog, with its service, model and project folder.</li>
 <li><strong>Rename</strong> (Alt+R): give it a title. An empty title goes back to the automatic one (the first question).</li>
@@ -248,7 +295,9 @@ for those the button is <strong>Unarchive</strong>.</li>
 <li><strong>Delete</strong> (Alt+D or the Delete key): permanently delete it, after a Yes/No question.</li>
 <li><strong>Export</strong> (Alt+X): save the whole conversation as a Word, PDF, text, web page or Markdown file
 (into its project folder, or Documents\Ask AI). Answers are headed ChatGPT or Claude.</li>
-<li><strong>Import</strong> (Alt+I): add a conversation from a .json file, for example one copied from another PC.</li>
+<li><strong>Import</strong> (Alt+I): add a conversation from a .json file, for example one copied from another PC.
+An imported conversation is not trusted: its project folder is dropped (choose one again), dates in the future are set to now,
+and its messages are sent to the AI marked as untrusted earlier conversation, to be treated as data, not as instructions.</li>
 </ul>
 <p><strong>Where conversations are stored.</strong> One file per conversation in <code>%LOCALAPPDATA%\askAI\conversations</code>.
 In the settings you can choose another <strong>Conversations folder</strong>, for example a OneDrive folder, to continue your conversations on another PC.
@@ -259,7 +308,8 @@ On first start Ask AI copies the conversations of Ask GPT from <code>%LOCALAPPDA
 <p>NVDA menu, Preferences, Settings, Ask AI:</p>
 <ul>
 <li><strong>Default AI service</strong> (Alt+V): the service new conversations use.</li>
-<li><strong>Account settings for</strong> (Alt+G): which service the next controls show, up to Default reasoning effort.</li>
+<li><strong>Show settings for service</strong> (Alt+G): which service the group "<em>Service</em> account and defaults" below shows
+(status, sign-in buttons, program path, default model and effort). NVDA says the shown service's status once, about half a second after you stop on it.</li>
 <li><strong>Status</strong>: shows Signed in with ChatGPT, Signed in with Claude, Not signed in, Codex not found, Claude Code not found, or Node.js not found.</li>
 <li><strong>Sign in to ChatGPT</strong> or <strong>Sign in to Claude</strong> (Alt+S), <strong>Check status</strong> (Alt+H), <strong>Sign out</strong> (Alt+T, asks for confirmation),
 <strong>Copy sign-in link</strong> (Alt+Y, available while signing in) and, for Claude, <strong>Enter sign-in code</strong>.</li>
@@ -273,22 +323,28 @@ They are sent with every question, to both services.</li>
 <li><strong>Speak answers automatically</strong> (Alt+P, on by default).</li>
 <li><strong>Keep conversation context for follow-up questions</strong> (Alt+K, on by default). About the last 10 questions and answers are sent along with each new question.</li>
 <li><strong>Beep while waiting for an answer</strong> (Alt+W, on by default).</li>
-<li><strong>Allow the AI to create and edit files in the project folder</strong> (Alt+J, on by default). When off, the AI can only read the project folder.</li>
-<li><strong>Announce when answers finish while working in other apps</strong> (on by default; no shortcut letter, reach it with Tab).</li>
+<li><strong>Allow the AI to create and edit files in the project folder</strong> (Alt+J, on by default). Even when on, Ask AI asks once per folder
+before the AI may write there. When off, the AI can only read the project folder (Claude) or not open it at all (ChatGPT).</li>
+<li><strong>Announce when answers finish while working in other apps</strong> (Alt+U, on by default).</li>
 <li><strong>Answer timeout in seconds</strong> (Alt+N, default 180, from 30 to 600).</li>
 <li><strong>Dictation silence timeout in seconds</strong> (Alt+D, default 4, from 2 to 15): how long NVDA waits after the last dictated words before speaking again.</li>
 <li><strong>Conversations folder</strong> (Alt+F, blank for the default) and <strong>Choose folder</strong> (Alt+E).</li>
-<li><strong>Check for updates automatically</strong> (Alt+L, on by default) and <strong>Check for updates now</strong> (Alt+U).</li>
+<li><strong>Check for updates automatically</strong> (Alt+L, on by default). To check now, use NVDA menu, Tools, Check for Ask AI updates.</li>
+<li><strong>Remove old Ask GPT add-on</strong>: only shown while Ask GPT 1.x is still installed (no shortcut letter, reach it with Tab).</li>
 </ul>
 
 <h2>Updates</h2>
-<p>If you installed Ask AI from a .nvda-addon file, it looks for a newer version on GitHub about 30 seconds after NVDA starts, at most once a day.
-You can also press Check for updates now in the settings, or choose NVDA menu, Tools, Check for Ask AI updates.
-When a newer version exists, NVDA asks "Ask AI 1.3.0 is available. Download and install now?". If you answer Yes, the add-on downloads it from
-GitHub, checks its SHA-256 checksum against the release's checksum file (it refuses to install a file that does not match), and then NVDA's own
-add-on installation asks you to confirm and to restart NVDA. Test versions (betas) are only offered if you use a test version.
-If you installed Ask AI from the NVDA Add-on Store, the store keeps it up to date instead
-(NVDA menu, Tools, Add-on Store, Updatable add-ons), and the add-on does not check GitHub.</p>
+<p>If you installed Ask AI from a .nvda-addon file, it looks for a newer version on GitHub about 30 seconds after NVDA starts, at most once a day
+(setting "Check for updates automatically"). To check now, choose NVDA menu, Tools, Check for Ask AI updates.
+When a newer version exists, a dialog says for example "Ask AI 1.3.0 is available." with the buttons <strong>Install</strong>,
+<strong>What's new</strong> (the release notes, in a window you can read), <strong>Skip this version</strong> (automatic checks then stay quiet about it)
+and <strong>Later</strong> (also Escape).</p>
+<p>Install downloads the release from the add-on's own GitHub page only, then checks it before NVDA sees it:
+the list of checksums must carry a valid signature made with the add-on's release key (the public key is built into the add-on),
+the file's SHA-256 checksum must match that list, and the file must be an Ask AI add-on of the offered version.
+If anything does not match, nothing is installed. Then NVDA's own add-on installation asks you to confirm and to restart NVDA.
+Test versions (betas) are only offered if you use a test version. If you installed Ask AI from the NVDA Add-on Store, the store keeps it up to date
+instead (NVDA menu, Tools, Add-on Store, Updatable add-ons), and the add-on does not check GitHub.</p>
 
 <h2>Keyboard shortcuts</h2>
 <table>
@@ -303,8 +359,12 @@ If you installed Ask AI from the NVDA Add-on Store, the store keeps it up to dat
 <tr><td>Ctrl+S</td><td>Ask AI dialog</td><td>Save the Question text as the draft</td></tr>
 <tr><td>Ctrl+F</td><td>Ask AI dialog</td><td>Find in the conversation</td></tr>
 <tr><td>F3 / Shift+F3</td><td>Ask AI dialog</td><td>Next / previous match</td></tr>
-<tr><td>Escape</td><td>Ask AI dialog</td><td>Stop dictating, cancel the question, or close</td></tr>
-<tr><td>Alt+Q, A, D, V, O, W, S, M, E, J, F, X, L, R, N, T, U, H, P, I</td><td>Ask AI dialog</td><td>Move to or press the control with that letter (listed above)</td></tr>
+<tr><td>Escape</td><td>Ask AI dialog</td><td>Stop dictating, or close the dialog (a running question keeps running)</td></tr>
+<tr><td>Alt+C</td><td>Ask AI dialog, while waiting</td><td>Cancel the question</td></tr>
+<tr><td>Alt+Q, A, D, T, I, U, V, O, W, H, P, R, N</td><td>Ask AI dialog</td><td>Move to or press the control with that letter (listed above)</td></tr>
+<tr><td>Alt+S, Alt+M, Alt+E, Alt+J</td><td>Ask AI dialog</td><td>Open Conversation options on AI service, Model, Reasoning effort or Project folder</td></tr>
+<tr><td>Enter, Delete</td><td>Attached to next question list</td><td>Read the attached screen text; remove the selected item</td></tr>
+<tr><td>Enter</td><td>Conversation manager, Search field</td><td>Continue the first match</td></tr>
 <tr><td>Alt+S, V, H, C, R, A, D, X, I; Delete</td><td>Conversation manager</td><td>Search, list, Show archived, Continue, Rename, Archive, Delete, Export, Import; Delete removes the selected conversation</td></tr>
 </table>
 <p>The NVDA gestures can be changed in NVDA menu, Preferences, Input gestures, Ask AI.</p>
@@ -329,18 +389,33 @@ For Claude, NVDA also says when the limit resets, if Claude Code reports it. Try
 <li>Error entries in the Conversation box end with "Technical details", which you can copy into a support request.</li>
 </ul>
 
-<h2>Privacy</h2>
-<p>Your questions, and the earlier part of the conversation when context is on, are sent by the conversation's program under your account:
-to OpenAI by Codex for ChatGPT, to Anthropic by Claude Code for Claude.
-Without a project folder, the program runs in an empty private folder (<code>%LOCALAPPDATA%\askAI\workdir</code>): Codex read-only, Claude without any tools.
-With a project folder, the AI can read the files in it (see "Project folders" above).
-The add-on saves your conversations as described under "Where conversations are stored", including any unsent draft,
-and your last 100 questions in <code>%LOCALAPPDATA%\askAI\history.json</code>.
-Screen text, screenshots and attached files are sent with one question only; the conversation keeps only their names and a short summary,
-and the private copies are deleted after the question. Claude Code is told not to keep its own session history
-for these questions; Codex may keep its own session logs in the .codex folder in your user profile.
-The update check contacts api.github.com and, for a download, github.com; it sends nothing but the add-on's version in its user agent.
-When NVDA exits, any running program is stopped and speech is turned back on if you were dictating.
-The add-on does nothing on secure screens such as the Windows sign-in screen.</p>
+<h2>Security and privacy</h2>
+<ul>
+<li><strong>What is sent.</strong> Your questions, the earlier part of the conversation when context is on, attached screen text, files and
+screenshots are sent by the conversation's program under your account: to OpenAI by Codex for ChatGPT, to Anthropic by Claude Code for Claude.
+Screen text, imported conversations and attached files are marked in the question as data, not instructions.</li>
+<li><strong>ChatGPT (Codex).</strong> Codex runs without your Codex configuration file and rules (<code>--ignore-user-config</code>,
+<code>--ignore-rules</code>; your sign-in is still used) and without saving its session (<code>--ephemeral</code>). Ask AI switches off Codex's
+web search, apps and connectors, plugins, browser and computer use, sub-agents, image generation and hooks. Without a writable project folder it also
+switches off the shell, so Codex can only answer; with one, the shell runs in Codex's workspace-write sandbox (see "Project folders").
+The add-on never uses Codex's "bypass sandbox" options.</li>
+<li><strong>Claude (Claude Code).</strong> Claude Code runs in restricted mode: your and the folder's Claude Code settings, hooks and MCP servers
+are not loaded, and without a project folder also not CLAUDE.md, skills or plugins (safe mode). It does not keep its session on disk.
+It gets no tools without a project folder, read tools for a read-only folder, and read and file-writing tools only when you allowed writing; never a shell,
+web access or other programs. There is no operating-system sandbox for Claude Code on Windows.</li>
+<li><strong>Project folders</strong> are checked before use and need your permission per folder to be written to (see "Project folders").</li>
+<li><strong>Billing.</strong> API keys from environment variables (OPENAI_API_KEY, CODEX_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN) are never
+passed to the programs, so they cannot switch you to pay-per-use billing.</li>
+<li><strong>Saved on your PC.</strong> Conversations (including unsent drafts) as described under "Where conversations are stored", your last 100 questions
+in <code>%LOCALAPPDATA%\askAI\history.json</code>, and in the NVDA settings the folders you allowed the AI to write in. Attached screen text, screenshots
+and files are kept only in a private folder for one question and deleted afterwards (and at the next start if NVDA stopped unexpectedly);
+the conversation keeps only their names and a short summary. Without a project folder the program runs in an empty private folder
+(<code>%LOCALAPPDATA%\askAI\workdir</code>). Codex keeps no session files with <code>--ephemeral</code>, Claude Code none with
+<code>--no-session-persistence</code>; both keep their own sign-in data in your user profile.</li>
+<li><strong>Updates</strong> contact api.github.com and github.com only, and are verified with the add-on's signing key before installing (see "Updates").</li>
+<li>When NVDA exits, any running program is stopped and speech is turned back on if you were dictating.
+The add-on does nothing on secure screens such as the Windows sign-in screen.</li>
+</ul>
+
 </body>
 </html>

@@ -6,6 +6,7 @@
 import json
 import os
 import tempfile
+import time
 
 MAX_ENTRIES = 100
 FILE_NAME = "history.json"
@@ -15,6 +16,31 @@ MAX_QUESTION_CHARS = 32000
 # Results of QuestionRecall.move().
 NO_EARLIER = "noEarlier"
 NO_LATER = "noLater"
+
+
+def _replace(source, target, attempts=3, delay=0.1):
+	"""os.replace, retried briefly on PermissionError (Windows: the file is open elsewhere)."""
+	for attempt in range(attempts):
+		try:
+			os.replace(source, target)
+			return
+		except PermissionError:
+			if attempt + 1 >= attempts:
+				raise
+			time.sleep(delay)
+
+
+def shouldRecall(older, caretLine, lineCount, recalledUnedited, text):
+	"""Up/Down recall rule: an empty box always; an untouched recalled entry only from its first line (Up)
+	or last line (Down), or when it is a single line. Typed text never.
+	"""
+	if not text.strip():
+		return True
+	if not recalledUnedited:
+		return False
+	if lineCount <= 1:
+		return True
+	return caretLine <= 0 if older else caretLine >= lineCount - 1
 
 
 def addEntry(entries, question, maxEntries=MAX_ENTRIES):
@@ -70,7 +96,9 @@ class QuestionHistory:
 		try:
 			with os.fdopen(fd, "wb") as f:
 				f.write(data)
-			os.replace(tempPath, self.path)
+				f.flush()
+				os.fsync(f.fileno())
+			_replace(tempPath, self.path)
 		except BaseException:
 			try:
 				os.remove(tempPath)

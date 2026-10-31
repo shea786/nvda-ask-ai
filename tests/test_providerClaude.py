@@ -153,6 +153,14 @@ class TestAskArguments(unittest.TestCase):
 		self.assertTrue(all(m.efforts == claude.REASONING_EFFORTS for m in claude.presetModels()))
 
 
+class TestSafeMode(unittest.TestCase):
+	def test_safeModeWithoutProjectFolder(self):
+		self.assertIn("--safe-mode", claude.buildAskArgs())
+		self.assertIn("--safe-mode", claude.buildAskArgs(readableFolder="/r"))
+		self.assertNotIn("--safe-mode", claude.buildAskArgs(projectFolder="/p"))
+		self.assertTrue(ClaudeProvider.readsOtherFiles)
+
+
 class TestAsk(TempDirTestCase):
 	def test_promptGoesToStdinAndNeverToArgv(self):
 		popen = FakePopen(stdout=(json.dumps(SUCCESS) + "\n").encode("utf-8"))
@@ -473,6 +481,31 @@ class TestCodexEnvironment(unittest.TestCase):
 		self.assertNotIn("OPENAI_API_KEY", env)
 		self.assertNotIn("CODEX_API_KEY", env)
 		self.assertEqual((env["PATH"], env["HOME"]), ("/bin", "/home/x"))
+
+	def test_redirectingAndSessionVariablesStripped(self):
+		env = {
+			"PATH": "/bin",
+			"HOME": "/home/x",
+			"ANTHROPIC_BASE_URL": "https://proxy.example",
+			"ANTHROPIC_DEFAULT_OPUS_MODEL": "x",
+			"CLAUDECODE": "1",
+			"CLAUDE_CODE_ENTRYPOINT": "sdk-ts",
+			"CLAUDE_CODE_MESSAGING_SOCKET": "/tmp/s",
+			"CLAUDE_CONFIG_DIR": "/home/x/.claude-alt",
+			"OPENAI_BASE_URL": "https://proxy.example",
+			"CODEX_HOME": "/home/x/.codex",
+		}
+		claudeEnv = base.childEnvironment(env, claude.STRIPPED_ENVIRONMENT, False, claude.KEPT_ENVIRONMENT)
+		self.assertEqual(
+			sorted(claudeEnv),
+			["CLAUDE_CONFIG_DIR", "CODEX_HOME", "HOME", "NO_COLOR", "OPENAI_BASE_URL", "PATH"],
+		)
+		codexEnv = base.childEnvironment(env, codex.STRIPPED_ENVIRONMENT, False)
+		self.assertNotIn("OPENAI_BASE_URL", codexEnv)
+		self.assertEqual(codexEnv["CODEX_HOME"], "/home/x/.codex")
+		# Windows environment names are case-insensitive.
+		winEnv = base.childEnvironment({"Anthropic_Base_Url": "x", "Path": "p"}, claude.STRIPPED_ENVIRONMENT, True)
+		self.assertEqual(sorted(winEnv), ["NO_COLOR", "Path"])
 
 	def test_codexLoginState(self):
 		self.assertEqual(codex.loginState(0, "Logged in using ChatGPT")[0], base.STATE_SUBSCRIPTION)

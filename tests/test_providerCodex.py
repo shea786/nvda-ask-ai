@@ -253,7 +253,7 @@ class TestProjectMode(TempDirTestCase):
 		project = base.buildPrompt("q", projectInstructions=codex.CodexProvider.projectInstructions(True))
 		self.assertIn(codex.PROJECT_INSTRUCTIONS, project)
 		readOnly = base.buildPrompt("q", projectInstructions=codex.CodexProvider.projectInstructions(False))
-		self.assertIn("cannot create or change files", readOnly)
+		self.assertIn("no tools to open or change files", readOnly)
 		self.assertIn("tell the user the exact file name", project)
 		self.assertIn("Do not modify or delete existing files unless the user asks.", project)
 		self.assertTrue(project.startswith(base.DEFAULT_INSTRUCTIONS))
@@ -262,6 +262,34 @@ class TestProjectMode(TempDirTestCase):
 		self.assertTrue(base.isValidModel("gpt-6.1-sol"))
 		args = codex.buildExecArgs("out.txt", model="gpt-6.1-sol", reasoningEffort="xhigh")
 		self.assertEqual(args[args.index("-m") + 1], "gpt-6.1-sol")
+
+
+class TestHardening(unittest.TestCase):
+	"""S-H2: flags verified with codex-cli 0.160.0 (`codex exec --help`, `codex features list`)."""
+
+	def test_alwaysPresent(self):
+		for folder, writes in (("", False), ("", True), ("/p", False), ("/p", True)):
+			args = codex.buildExecArgs("/w/a.txt", projectFolder=folder, allowWrites=writes, isWindows=False)
+			for flag in ("--ignore-user-config", "--ignore-rules", "--ephemeral"):
+				self.assertIn(flag, args)
+			disabled = [args[i + 1] for i, arg in enumerate(args) if arg == "--disable"]
+			for feature in ("apps", "plugins", "browser_use", "computer_use", "multi_agent", "image_generation", "hooks"):
+				self.assertIn(feature, disabled)
+			self.assertEqual(args[args.index("web_search=disabled") - 1], "-c")
+			self.assertEqual(args[-1], "-")
+			for forbidden in ("--dangerously", "danger-full-access", "--search", "--enable"):
+				self.assertNotIn(forbidden, " ".join(args))
+
+	def test_shellOnlyInWritableProject(self):
+		def disabled(folder, writes):
+			args = codex.buildExecArgs("/w/a.txt", projectFolder=folder, allowWrites=writes, isWindows=False)
+			return [args[i + 1] for i, arg in enumerate(args) if arg == "--disable"]
+
+		for folder, writes in (("", False), ("", True), ("/p", False)):
+			self.assertIn("shell_tool", disabled(folder, writes))
+			self.assertIn("unified_exec", disabled(folder, writes))
+		self.assertNotIn("shell_tool", disabled("/p", True))
+		self.assertFalse(codex.CodexProvider.readsOtherFiles)
 
 
 class TestProcessControl(TempDirTestCase):

@@ -131,7 +131,7 @@ if grep -q SLOW-FINISHED "$C/fakecodex/calls.log"; then echo "SHELL FAIL a slow 
 # Conversations are saved as JSON files, one per conversation, readable after NVDA exits.
 # Claude answers are only expected when the run includes Claude steps.
 EXPECT_CLAUDE=1
-case "$ASKAI_SMOKE_ONLY" in round6a|round6b) EXPECT_CLAUDE=0 ;; esac
+case "$ASKAI_SMOKE_ONLY" in round6a|round6b|oldaddon) EXPECT_CLAUDE=0 ;; esac
 python3 -I "$HERE/check-conversations.py" "$CONVERSATIONS" "$OLD_CONVERSATIONS" "$MIN_CONVERSATIONS" "$EXPECT_CLAUDE" || true
 "$WINESERVER" -k 2>/dev/null || true
 # After a wineserver crash the wine loader can wait forever on a defunct nvda.exe.

@@ -76,9 +76,12 @@ INSTALL_HELP = (
 	"Then restart NVDA, or set the Claude Code executable path in the Ask AI settings."
 )
 
-# With either of these set, Claude Code would use (and bill) the Anthropic API instead of the user's
-# Claude subscription, so they are never passed on.
-STRIPPED_ENVIRONMENT = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+# ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN would make Claude Code use (and bill) the Anthropic API instead
+# of the user's Claude subscription; ANTHROPIC_BASE_URL would send requests (and the sign-in token) to
+# another host; CLAUDE_CODE_* / CLAUDECODE from a surrounding Claude Code session make the child attach to
+# that session and hang. None of them are passed on. CLAUDE_CONFIG_DIR is kept: it is where the sign-in lives.
+STRIPPED_ENVIRONMENT = ("ANTHROPIC_*", "CLAUDE*")
+KEPT_ENVIRONMENT = ("CLAUDE_CONFIG_DIR",)
 
 _NOT_LOGGED_IN_PATTERNS = patterns(
 	r"\bnot logged in\b",
@@ -195,6 +198,11 @@ def buildAskArgs(model="", effort="", projectFolder="", allowWrites=False, reada
 		"--strict-mcp-config",
 		"--restricted",
 	]
+	if not projectFolder:
+		# `claude --help`: "--safe-mode  Start with all customizations (CLAUDE.md, skills, installed plugins,
+		# hooks, MCP servers, custom commands and agents, ...) disabled ... Auth, model selection, built-in
+		# tools and plugins, and permissions work normally."
+		args.append("--safe-mode")
 	if projectFolder and readableFolder:
 		args += ["--add-dir", base.projectFolderArgument(readableFolder)]
 	args += [
@@ -387,6 +395,7 @@ class ClaudeProvider(base.CliProvider):
 	npmPackage = "@anthropic-ai/claude-code"
 	installHelp = INSTALL_HELP
 	strippedEnvironment = STRIPPED_ENVIRONMENT
+	keptEnvironment = KEPT_ENVIRONMENT
 	# `claude auth login --help`: "--claudeai  Use Claude subscription (default)".
 	loginArgs = ("auth", "login", "--claudeai")
 	logoutArgs = ("auth", "logout")
@@ -395,6 +404,7 @@ class ClaudeProvider(base.CliProvider):
 	loginAcceptsCode = True
 	defaultEfforts = REASONING_EFFORTS
 	imagesAttachedDirectly = False
+	readsOtherFiles = True
 
 	@classmethod
 	def candidatePaths(cls, env=None, isWindows=base.IS_WINDOWS):

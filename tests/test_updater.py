@@ -10,9 +10,12 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
+import zipfile
+from unittest import mock
 
 import helpers
 
@@ -20,10 +23,27 @@ _PACKAGE = os.path.join(helpers.ROOT, "addon", "globalPlugins", "askAI")
 if _PACKAGE not in sys.path:
 	sys.path.insert(0, _PACKAGE)
 
+import ed25519  # noqa: E402
 import updater  # noqa: E402
 from updater import Asset, Release, UpdateError  # noqa: E402
 
-ADDON_BYTES = b"PK\x03\x04 fake add-on bytes " * 100
+# A test signing key (never the release key); its public key replaces updater.SIGNING_PUBLIC_KEY in tests.
+TEST_SECRET = bytes(range(32))
+TEST_PUBLIC = ed25519.publicKey(TEST_SECRET)
+
+
+def makeAddon(manifest='name = askAI\nsummary = "Ask AI"\nversion = 1.3.0\n', extra=()):
+	buffer = io.BytesIO()
+	with zipfile.ZipFile(buffer, "w") as archive:
+		if manifest is not None:
+			archive.writestr("manifest.ini", manifest)
+		archive.writestr("globalPlugins/askAI/__init__.py", "# code\n")
+		for name, data in extra:
+			archive.writestr(name, data)
+	return buffer.getvalue()
+
+
+ADDON_BYTES = makeAddon()
 ADDON_SHA = hashlib.sha256(ADDON_BYTES).hexdigest()
 DL = "https://github.com/shea786/nvda-ask-gpt/releases/download"
 
@@ -34,9 +54,11 @@ def releaseJson(tag="v1.3.0", prerelease=False, draft=False, assets=None, versio
 		assets = [
 			{"name": "askAI-%s.nvda-addon" % version, "browser_download_url": "%s/%s/askAI-%s.nvda-addon" % (DL, tag, version), "size": len(ADDON_BYTES)},
 			{"name": "SHA256SUMS.txt", "browser_download_url": "%s/%s/SHA256SUMS.txt" % (DL, tag), "size": 100},
+			{"name": "SHA256SUMS.txt.sig", "browser_download_url": "%s/%s/SHA256SUMS.txt.sig" % (DL, tag), "size": 64},
 			{"name": "TESTING.txt", "browser_download_url": "%s/%s/TESTING.txt" % (DL, tag), "size": 100},
 		]
 	return {
+		"body": "Release notes for %s." % version,
 		"tag_name": tag,
 		"name": "Ask AI %s" % version,
 		"html_url": "https://github.com/shea786/nvda-ask-gpt/releases/tag/%s" % tag,
@@ -79,11 +101,15 @@ class FakeUrlopen:
 		return FakeResponse(route, request.full_url)
 
 
-def downloadRoutes(release, checksums=None, addon=ADDON_BYTES):
+def downloadRoutes(release, checksums=None, addon=ADDON_BYTES, signature=None, secret=TEST_SECRET):
 	if checksums is None:
-		checksums = "%s  %s\n" % (ADDON_SHA, release.addonAsset.name)
+		checksums = "%s  %s\n" % (hashlib.sha256(addon).hexdigest(), release.addonAsset.name)
+	data = checksums.encode("utf-8")
+	if signature is None:
+		signature = ed25519.sign(secret, data)
 	return {
-		release.checksumsAsset.url: checksums.encode("utf-8"),
+		release.signatureAsset.url: signature,
+		release.checksumsAsset.url: data,
 		release.addonAsset.url: addon,
 	}
 
@@ -114,7 +140,22 @@ class TestVersions(unittest.TestCase):
 		self.assertTrue(updater.isNewer("1.2.0", "1.2.1"))
 		self.assertFalse(updater.isNewer("1.2.0", "1.2.0"))
 		self.assertFalse(updater.isNewer("1.2.0", "nonsense"))
-		self.assertTrue(updater.isNewer("garbage", "1.0.0"))
+		# L4: an installed version that cannot be parsed is never offered an update (not treated as "0").
+		self.assertFalse(updater.isNewer("garbage", "1.0.0"))
+		self.assertFalse(updater.isNewer(None, "1.0.0"))
+		self.assertIsNone(updater.pickUpdate("garbage", updater.parseReleases([releaseJson("v9.0.0")])))
+
+	def test_updateDecision(self):
+		release = updater.parseRelease(releaseJson("v1.3.0"))
+		self.assertEqual(updater.updateDecision("1.2.0", release), updater.DECISION_OFFER)
+		self.assertEqual(updater.updateDecision("1.3.0", release), updater.DECISION_NONE)
+		self.assertEqual(updater.updateDecision("1.2.0", None), updater.DECISION_NONE)
+		self.assertEqual(updater.updateDecision(None, release), updater.DECISION_NONE)
+		self.assertEqual(updater.updateDecision("1.2.0", release, "1.3.0"), updater.DECISION_SKIPPED, "automatic: skipped")
+		self.assertEqual(updater.updateDecision("1.2.0", release, "v1.3.0"), updater.DECISION_SKIPPED)
+		self.assertEqual(updater.updateDecision("1.2.0", release, "1.3.0", manual=True), updater.DECISION_OFFER)
+		self.assertEqual(updater.updateDecision("1.2.0", release, "1.2.5"), updater.DECISION_OFFER, "an older skip does not hide 1.3.0")
+		self.assertEqual(updater.updateDecision("1.2.0", release, "junk"), updater.DECISION_OFFER)
 
 
 class TestReleases(unittest.TestCase):
@@ -123,6 +164,9 @@ class TestReleases(unittest.TestCase):
 		self.assertEqual((release.version, release.tag), ("1.3.0", "v1.3.0"))
 		self.assertEqual(release.addonAsset.name, "askAI-1.3.0.nvda-addon")
 		self.assertEqual(release.checksumsAsset.name, "SHA256SUMS.txt")
+		self.assertEqual(release.signatureAsset.name, "SHA256SUMS.txt.sig")
+		self.assertEqual(release.notes, "Release notes for 1.3.0.")
+		self.assertEqual(release.downloadPrefix, DL + "/v1.3.0/")
 		self.assertFalse(release.isPrerelease)
 		self.assertTrue(updater.parseRelease(releaseJson("v1.3.0-beta1")).isPrerelease)
 		self.assertTrue(updater.parseRelease(releaseJson("v1.3.0", prerelease=True)).isPrerelease)
@@ -275,6 +319,10 @@ class TestFetch(unittest.TestCase):
 		self.assertEqual([r.full_url for r, _t in urlopen.requests], [updater.LATEST_URL])
 		self.assertIsNone(updater.checkForUpdate("1.3.0", urlopen))
 		self.assertIsNone(updater.checkForUpdate("1.2.0", FakeUrlopen({})), "no release published yet")
+		unknown = FakeUrlopen({updater.LATEST_URL: json.dumps(releaseJson("v9.0.0")).encode()})
+		self.assertIsNone(updater.checkForUpdate(None, unknown))
+		self.assertIsNone(updater.checkForUpdate("not a version", unknown))
+		self.assertEqual(unknown.requests, [], "nothing is fetched for an unknown installed version")
 
 	def test_checkForUpdatePrerelease(self):
 		data = [releaseJson("v1.2.0-beta2", prerelease=True), releaseJson("v1.2.0-beta1", prerelease=True), releaseJson("v1.1.0")]
@@ -299,6 +347,9 @@ class TestChecksumsAndDownload(unittest.TestCase):
 		self.dir = tempfile.mkdtemp(prefix="askai-update-test-")
 		self.addCleanup(shutil.rmtree, self.dir, True)
 		self.release = updater.parseRelease(releaseJson("v1.3.0"))
+		patcher = mock.patch.object(updater, "SIGNING_PUBLIC_KEY", TEST_PUBLIC)
+		patcher.start()
+		self.addCleanup(patcher.stop)
 
 	def test_parseChecksums(self):
 		other = "b" * 64
@@ -314,11 +365,163 @@ class TestChecksumsAndDownload(unittest.TestCase):
 		self.assertTrue(all(timeout == 10 for _r, timeout in urlopen.requests))
 
 	def test_mismatchRemovesFile(self):
-		urlopen = FakeUrlopen(downloadRoutes(self.release, addon=ADDON_BYTES + b"tampered"))
+		checksums = "%s  %s\n" % (ADDON_SHA, self.release.addonAsset.name)
+		urlopen = FakeUrlopen(downloadRoutes(self.release, checksums=checksums, addon=ADDON_BYTES + b"tampered"))
 		with self.assertRaises(UpdateError) as ctx:
 			updater.downloadUpdate(self.release, self.dir, urlopen)
 		self.assertEqual(ctx.exception.kind, "checksum")
 		self.assertEqual(os.listdir(self.dir), [])
+
+	def test_signatureIsRequiredAndChecked(self):
+		release = self.release
+		release.signatureAsset = None
+		urlopen = FakeUrlopen({})
+		with self.assertRaises(UpdateError) as ctx:
+			updater.downloadUpdate(release, self.dir, urlopen)
+		self.assertEqual(ctx.exception.kind, "signature")
+		self.assertEqual(urlopen.requests, [], "nothing is downloaded without a signature file")
+
+	def test_badSignaturesAreRefused(self):
+		routes = downloadRoutes(self.release)
+		good = routes[self.release.signatureAsset.url]
+		otherKey = bytes([7] * 32)
+		cases = {
+			"wrong key": downloadRoutes(self.release, secret=otherKey),
+			"flipped bit": dict(routes, **{self.release.signatureAsset.url: bytes([good[0] ^ 1]) + good[1:]}),
+			"empty": dict(routes, **{self.release.signatureAsset.url: b""}),
+			"garbage text": dict(routes, **{self.release.signatureAsset.url: b"not a signature"}),
+		}
+		# Checksums changed after signing (an attacker swapping the add-on and its hash).
+		tampered = dict(routes)
+		tampered[self.release.checksumsAsset.url] = ("%s  %s\n" % ("0" * 64, self.release.addonAsset.name)).encode()
+		cases["checksums changed after signing"] = tampered
+		for name, caseRoutes in cases.items():
+			with self.subTest(case=name):
+				urlopen = FakeUrlopen(caseRoutes)
+				with self.assertRaises(UpdateError) as ctx:
+					updater.downloadUpdate(self.release, self.dir, urlopen)
+				self.assertEqual(ctx.exception.kind, "signature")
+				self.assertNotIn(self.release.addonAsset.url, [r.full_url for r, _t in urlopen.requests], "add-on not fetched")
+				self.assertEqual(os.listdir(self.dir), [])
+		# The real release key is not the test key: a test-signed release is refused by the shipped key.
+		self.assertFalse(
+			updater.verifyChecksumsSignature(b"x", ed25519.sign(TEST_SECRET, b"x"), publicKey=bytes.fromhex("aa00000b0fc84e10e2b6071c2eae9c1f2c709160c7f478d8af02deafe7a9e6ce")),
+		)
+
+	def test_base64Signature(self):
+		import base64
+
+		routes = downloadRoutes(self.release)
+		routes[self.release.signatureAsset.url] = base64.b64encode(routes[self.release.signatureAsset.url]) + b"\n"
+		path = updater.downloadUpdate(self.release, self.dir, FakeUrlopen(routes))
+		self.assertTrue(os.path.isfile(path))
+		self.assertIsNone(updater.parseSignature(b"QUJD"))
+		self.assertIsNone(updater.parseSignature(b"x" * 65))
+
+	def test_signatureFileSizeCap(self):
+		routes = downloadRoutes(self.release)
+		routes[self.release.signatureAsset.url] = b"A" * (updater.MAX_SIGNATURE_BYTES + 1)
+		with self.assertRaises(UpdateError) as ctx:
+			updater.downloadUpdate(self.release, self.dir, FakeUrlopen(routes))
+		self.assertEqual(ctx.exception.kind, "tooLarge")
+
+	def test_urlsArePinnedToTheReleaseTag(self):
+		base = DL + "/v1.3.0/"
+		self.assertTrue(updater.isPinnedAssetUrl(base + "askAI-1.3.0.nvda-addon", "v1.3.0"))
+		for url, tag in (
+			(DL + "/v1.2.9/askAI-1.3.0.nvda-addon", "v1.3.0"),
+			("https://github.com/attacker/nvda-ask-gpt/releases/download/v1.3.0/askAI-1.3.0.nvda-addon", "v1.3.0"),
+			("https://github.com/shea786/nvda-ask-gpt-evil/releases/download/v1.3.0/a.nvda-addon", "v1.3.0"),
+			(base + "sub/askAI-1.3.0.nvda-addon", "v1.3.0"),
+			(base + "askAI-1.3.0.nvda-addon?x=1", "v1.3.0"),
+			(base, "v1.3.0"),
+			("http://github.com/shea786/nvda-ask-gpt/releases/download/v1.3.0/a.nvda-addon", "v1.3.0"),
+			("https://objects.githubusercontent.com/github-production-release-asset/x", "v1.3.0"),
+			(base + "a.nvda-addon", ""),
+		):
+			self.assertFalse(updater.isPinnedAssetUrl(url, tag), url)
+		self.assertEqual(updater.releaseDownloadPrefix("v1.3.0-beta 1"), DL + "/v1.3.0-beta%201/")
+		for attr in ("addonAsset", "checksumsAsset", "signatureAsset"):
+			with self.subTest(asset=attr):
+				release = updater.parseRelease(releaseJson("v1.3.0"))
+				getattr(release, attr).url = DL + "/v1.2.0/" + getattr(release, attr).name
+				urlopen = FakeUrlopen(downloadRoutes(release))
+				with self.assertRaises(UpdateError) as ctx:
+					updater.downloadUpdate(release, self.dir, urlopen)
+				self.assertEqual(ctx.exception.kind, "invalid")
+				self.assertEqual(urlopen.requests, [])
+
+	def test_manifestMustMatch(self):
+		cases = {
+			"wrong name": makeAddon('name = otherAddon\nversion = 1.3.0\n'),
+			"wrong version": makeAddon('name = askAI\nversion = 1.2.9\n'),
+			"missing manifest": makeAddon(None),
+			"manifest in a folder": makeAddon(None, extra=[("addon/manifest.ini", "name = askAI\nversion = 1.3.0\n")]),
+			"name hidden in a triple-quoted description": makeAddon(
+				'name = evil\ndescription = """Nice.\nname = askAI\nversion = 1.3.0\n"""\nversion = 1.3.0\n',
+			),
+			"not a zip": b"PK\x03\x04 not really a zip" * 10,
+		}
+		for name, addon in cases.items():
+			with self.subTest(case=name):
+				with self.assertRaises(UpdateError) as ctx:
+					updater.downloadUpdate(self.release, self.dir, FakeUrlopen(downloadRoutes(self.release, addon=addon)))
+				self.assertEqual(ctx.exception.kind, "invalid")
+				self.assertEqual(os.listdir(self.dir), [], "the refused file is deleted")
+		good = makeAddon('name = "askAI"\ndescription = """Line one.\nname = evil\n"""\nversion = "1.3.0"  \n')
+		path = updater.downloadUpdate(self.release, self.dir, FakeUrlopen(downloadRoutes(self.release, addon=good)))
+		self.assertTrue(os.path.isfile(path))
+
+	def test_parseManifest(self):
+		text = (
+			"# comment\nname = askAI\nsummary = \"Ask AI\"\n"
+			"description = \"\"\"First line\nname = evil\nlast\"\"\"\n"
+			"author = 'Asif Ali'\nversion = 1.2.0 # trailing comment\n[section]\n"
+		)
+		fields = updater.parseManifest(text)
+		self.assertEqual(fields["name"], "askAI")
+		self.assertEqual(fields["summary"], "Ask AI")
+		self.assertEqual(fields["description"], "First line\nname = evil\nlast")
+		self.assertEqual(fields["author"], "Asif Ali")
+		self.assertEqual(fields["version"], "1.2.0")
+		with self.assertRaises(ValueError):
+			updater.parseManifest('description = """never closed\nname = askAI\n')
+		with self.assertRaises(ValueError):
+			updater.parseManifest("name = askAI\nname = evil\n")
+		with open(os.path.join(helpers.ROOT, "addon", "manifest.ini"), encoding="utf-8") as f:
+			real = updater.parseManifest(f.read())
+		self.assertEqual(real["name"], "askAI")
+		self.assertIn("ChatGPT", real["description"])
+
+	def test_downloadDeadline(self):
+		urlopen = FakeUrlopen(downloadRoutes(self.release))
+		with self.assertRaises(UpdateError) as ctx:
+			updater.downloadUpdate(self.release, self.dir, urlopen, now=lambda: time.monotonic() - updater.DOWNLOAD_DEADLINE - 1)
+		self.assertEqual(ctx.exception.kind, "network")
+		self.assertIn("timed out", ctx.exception.message)
+		self.assertEqual(updater.DOWNLOAD_DEADLINE, 120)
+		path = os.path.join(self.dir, "x.nvda-addon")
+		url = self.release.addonAsset.url
+		with self.assertRaises(UpdateError):
+			updater.downloadToFile(url, path, urlopen=FakeUrlopen({url: ADDON_BYTES}), deadline=time.monotonic() - 1)
+		self.assertFalse(os.path.exists(path))
+
+	def test_tempDirs(self):
+		folder = tempfile.mkdtemp(prefix="askai-tmp-root-")
+		self.addCleanup(shutil.rmtree, folder, True)
+		with mock.patch.object(updater.tempfile, "gettempdir", lambda: folder), mock.patch.object(updater.tempfile, "tempdir", folder):
+			made = updater.makeTempDir()
+			self.assertTrue(os.path.basename(made).startswith("askAI-update-"))
+			other = os.path.join(folder, "keep-me")
+			os.makedirs(other)
+			updater.removeTempDir(other)
+			self.assertTrue(os.path.isdir(other), "only askAI-update-* folders are ever removed")
+			updater.removeTempDir(made)
+			self.assertFalse(os.path.exists(made))
+			os.makedirs(os.path.join(folder, "askAI-update-old1"))
+			os.makedirs(os.path.join(folder, "askAI-update-old2"))
+			self.assertEqual(updater.cleanStaleTempDirs(folder), 2)
+			self.assertEqual(os.listdir(folder), ["keep-me"])
 
 	def test_missingEntry(self):
 		urlopen = FakeUrlopen(downloadRoutes(self.release, checksums="%s  other.nvda-addon\n" % ADDON_SHA))
@@ -370,6 +573,59 @@ class TestChecksumsAndDownload(unittest.TestCase):
 		path = os.path.join(self.dir, "a.nvda-addon")
 		url = self.release.addonAsset.url
 		self.assertEqual(updater.downloadToFile(url, path, urlopen=FakeUrlopen({url: ADDON_BYTES})), ADDON_SHA)
+
+
+class TestReleaseKeyAndTools(unittest.TestCase):
+	def test_embeddedPublicKeyIsAValidEd25519Key(self):
+		self.assertEqual(len(updater.SIGNING_PUBLIC_KEY), 32)
+		self.assertIsNotNone(ed25519._decompress(updater.SIGNING_PUBLIC_KEY))
+		self.assertNotEqual(updater.SIGNING_PUBLIC_KEY, TEST_PUBLIC)
+
+	def test_verifyToolRejectsUnsignedSums(self):
+		import subprocess
+
+		folder = tempfile.mkdtemp(prefix="askai-sigtool-")
+		self.addCleanup(shutil.rmtree, folder, True)
+		sums = os.path.join(folder, "SHA256SUMS.txt")
+		sig = os.path.join(folder, "SHA256SUMS.txt.sig")
+		with open(sums, "wb") as f:
+			f.write(b"%s  askAI-1.2.0.nvda-addon\n" % (b"0" * 64))
+		with open(sig, "wb") as f:
+			f.write(ed25519.sign(TEST_SECRET, open(sums, "rb").read()))
+		tool = os.path.join(helpers.ROOT, "tools", "release", "verify_sums.py")
+		result = subprocess.run([sys.executable, "-I", tool, sums, sig], capture_output=True, text=True)
+		self.assertEqual(result.returncode, 1, "signed with a key that is not the release key")
+		self.assertIn("FAIL", result.stdout)
+		with open(sig, "wb") as f:
+			f.write(b"short")
+		result = subprocess.run([sys.executable, "-I", tool, sums, sig], capture_output=True, text=True)
+		self.assertEqual(result.returncode, 1)
+
+
+class TestUpdateDialogSource(unittest.TestCase):
+	def test_buttonsAndMnemonics(self):
+		import re
+
+		with open(os.path.join(_PACKAGE, "updateCheck.py"), encoding="utf-8") as f:
+			source = f.read()
+		start = source.index("class UpdateDialog(")
+		body = source[start:source.index("\ndef askAboutUpdate")]
+		labels = re.findall(r'label=_\("([^"]*)"\)', body)
+		self.assertEqual(labels, ["&Install", "&What's new", "&Skip this version", "&Later"])
+		letters = [label[label.index("&") + 1].lower() for label in labels]
+		self.assertEqual(len(letters), len(set(letters)))
+		self.assertIn("self.SetEscapeId(wx.ID_CANCEL)", body, "Escape means Later")
+		self.assertIn("self.installButton.SetDefault()", body)
+		self.assertIn("ui.browseableMessage(notes", body)
+		self.assertNotIn("askYesNo", source)
+		self.assertIn("gui.mainFrame.prePopup()", source)
+		# L4: no startfile fallback once NVDA's installer was reached; temp folders are removed.
+		install = source[source.index("def installDownloaded"):]
+		self.assertLess(install.index("install(path)"), install.index("os.startfile(path)"))
+		self.assertIn("return False\n\ttry:\n\t\tos.startfile(path)", install)
+		self.assertIn("updater.removeTempDir(folder)", source)
+		self.assertIn("updater.cleanStaleTempDirs()", source)
+		self.assertIn('"skippedUpdateVersion"', source)
 
 
 class TestModules(unittest.TestCase):

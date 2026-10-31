@@ -3,7 +3,19 @@
 # The NVDA glue passes in the focus and navigator objects and functions that read their text
 # (TextInfo POSITION_SELECTION / POSITION_ALL), so this module stays free of NVDA imports.
 
+import re
+
 MAX_CONTEXT_CHARS = 20000
+
+SUMMARY_TEMPLATES = {
+	"selection": "Selected text from {app}, {count} characters",
+	"selectionCut": "Selected text from {app}, cut to {count} characters",
+	"object": "Text of the current object ({role}) from {app}, {count} characters",
+	"objectCut": "Text of the current object ({role}) from {app}, cut to {count} characters",
+	"objectNoRole": "Text of the current object from {app}, {count} characters",
+	"objectNoRoleCut": "Text of the current object from {app}, cut to {count} characters",
+	"theScreen": "the screen",
+}
 
 REASON_PROTECTED = "protected"
 REASON_EMPTY = "empty"
@@ -34,6 +46,11 @@ def isProtectedObject(obj, passwordRole=None, protectedState=None):
 		return True
 
 
+def _clean(text, limit=150):
+	text = re.sub(r"[`\r\n\t\x00-\x1f]+", " ", text or "")
+	return re.sub(r" {2,}", " ", text).strip()[:limit]
+
+
 def _safe(read, obj):
 	if obj is None or read is None:
 		return ""
@@ -51,25 +68,47 @@ class ScreenContext:
 	@ivar appName: the application, e.g. "Microsoft Word" or "winword".
 	@ivar windowTitle: the foreground window's title.
 	@ivar truncated: True when the text was cut to MAX_CONTEXT_CHARS.
-	@ivar screenshot: (width, height, BGRA bytes) of the window, captured with the context, or None.
+	@ivar screenshot: (width, height, BGRA bytes) of the window, captured when the question is sent and
+	only if the user ticked "Include a screenshot", or None.
+	@ivar hwnd: the foreground window when the text was captured (for a screenshot at send time), or 0.
+	@ivar roleName: the navigator object's role ("document", "button") for the summary, or "".
 	"""
 
-	def __init__(self, text, source, appName="", windowTitle="", truncated=False, screenshot=None):
+	def __init__(self, text, source, appName="", windowTitle="", truncated=False, screenshot=None, hwnd=0, roleName=""):
 		self.text = text
 		self.source = source
 		self.appName = appName or ""
 		self.windowTitle = windowTitle or ""
 		self.truncated = truncated
 		self.screenshot = screenshot
+		self.hwnd = hwnd or 0
+		self.roleName = roleName or ""
 
-	def summary(self, template="{count} characters from {where}"):
-		"""For example "1,240 characters from Microsoft Word, Report.docx" (no captured text in it)."""
-		where = ", ".join(part for part in (self.appName, self.windowTitle) if part) or "the screen"
-		return template.format(count="{:,}".format(len(self.text)), where=where)
+	def summary(self, templates=SUMMARY_TEMPLATES):
+		"""Source, application and size, never the text: "Selected text from Word, 1,240 characters" or
+		"Text of the current object (document) from Edge, cut to 20,000 characters".
+		"""
+		app = _clean(self.appName) or _clean(self.windowTitle) or templates["theScreen"]
+		if self.source == "selection":
+			key = "selection"
+		elif self.roleName:
+			key = "object"
+		else:
+			key = "objectNoRole"
+		if self.truncated:
+			key += "Cut"
+		return templates[key].format(app=app, role=_clean(self.roleName), count="{:,}".format(len(self.text)))
+
+	@property
+	def windowName(self):
+		"""The window for the screenshot checkbox label."""
+		return _clean(self.windowTitle) or _clean(self.appName)
 
 	def label(self):
-		"""Label of the fenced prompt block (application and window, never the text)."""
-		where = ", ".join(part for part in (self.appName, self.windowTitle) if part)
+		"""Label of the fenced prompt block (application and window, never the text). The names come from
+		other programs, so backticks and line breaks are removed (they could otherwise end the fence).
+		"""
+		where = ", ".join(_clean(part) for part in (self.appName, self.windowTitle) if _clean(part))
 		return "Text from the user's screen%s" % ((" (%s)" % where) if where else "")
 
 
@@ -82,6 +121,8 @@ def captureContext(
 	windowTitle="",
 	isProtected=isProtectedObject,
 	maxChars=MAX_CONTEXT_CHARS,
+	roleName="",
+	hwnd=0,
 ):
 	"""The selected text of the focus object; otherwise the navigator object's name, value and text.
 	@raise ContextError: REASON_PROTECTED for protected (password) fields, REASON_EMPTY when there is no text.
@@ -110,4 +151,4 @@ def captureContext(
 	truncated = len(text) > maxChars
 	if truncated:
 		text = text[:maxChars]
-	return ScreenContext(text, source, appName, windowTitle, truncated)
+	return ScreenContext(text, source, appName, windowTitle, truncated, hwnd=hwnd, roleName=roleName if source != "selection" else "")

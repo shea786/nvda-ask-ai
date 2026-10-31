@@ -121,7 +121,7 @@ class TestFencing(unittest.TestCase):
 	def test_metadataHasNamesNotContent(self):
 		screen = context.ScreenContext("secret screen text", "selection", "Word", "R")
 		metadata = attachments.messageMetadata([attachments.textAttachment("a.txt", "secret file")], screen, screenshot=True)
-		self.assertEqual(metadata, {"attachments": ["screenshot.png", "a.txt"], "context": "18 characters from Word, R"})
+		self.assertEqual(metadata, {"attachments": ["screenshot.png", "a.txt"], "context": "Selected text from Word, 18 characters"})
 		self.assertEqual(attachments.messageMetadata(), {})
 
 

@@ -21,7 +21,7 @@ from logHandler import log
 import tempfile
 import time
 
-from . import attachments, conversations, dictation, exporters, folderSnapshot, history, providers, search
+from . import attachments, conversations, dictation, exporters, folderSnapshot, history, migration, projectSafety, providers, search
 from . import status as statusText
 from .providers import base as providerBase
 from .providers import modelCatalog
@@ -45,8 +45,12 @@ BEEP_INTERVAL_MS = 2000
 DICTATION_POLL_MS = 400
 # How long to wait for the user to finish signing in in the browser (Claude may need a pasted code).
 LOGIN_TIMEOUT_SECONDS = 300
-# Delay before announcing after moving focus, so the focus announcement does not swallow it.
-ANNOUNCE_AFTER_FOCUS_MS = 100
+# After moving focus, announcements wait until NVDA's focus is on the target control (checked every
+# FOCUS_POLL_MS, at most FOCUS_WAIT_MS), so NVDA's own focus announcement does not swallow them.
+FOCUS_POLL_MS = 50
+FOCUS_WAIT_MS = 500
+# Kept for older callers.
+ANNOUNCE_AFTER_FOCUS_MS = FOCUS_POLL_MS
 # Settings panel layout (unscaled pixels). NVDA's settings area is about 566 pixels wide, and
 # NVDA's own panels wrap descriptions at 544, so no row may need more than that.
 PANEL_CONTENT_WIDTH = 544
@@ -57,6 +61,8 @@ INSTRUCTIONS_MIN_WIDTH = 300
 ASK_TEXT_WIDTH = 560
 # Read-only multi-line, so that Tab reaches it (a single-line read-only box is skipped by Tab in wx).
 STATUS_STYLE = wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_NO_VSCROLL
+# The settings check the sign-in status this long after the shown service last changed.
+STATUS_DEBOUNCE_MS = 400
 
 
 def _once(func):
@@ -104,6 +110,272 @@ def serviceName(providerId):
 def programName(providerId):
 	"""The program: "Codex" or "Claude Code"."""
 	return providers.get(providerId).programName
+
+
+def announceWhenFocused(control, message):
+	"""Speak message once NVDA's focus object is control (polled every 50 ms, at most 500 ms; then anyway)."""
+	waited = [0]
+
+	def check():
+		ready = True
+		try:
+			if control:
+				import api
+
+				focus = api.getFocusObject()
+				ready = focus is not None and focus.windowHandle == control.GetHandle()
+		except Exception:
+			ready = True
+		if ready or waited[0] >= FOCUS_WAIT_MS:
+			ui.message(message)
+			return
+		waited[0] += FOCUS_POLL_MS
+		wx.CallLater(FOCUS_POLL_MS, check)
+
+	wx.CallLater(FOCUS_POLL_MS, check)
+
+
+class RequestRefused(Exception):
+	"""A question that cannot be sent as it is; message is a translated explanation."""
+
+	def __init__(self, message):
+		super().__init__(message)
+		self.message = message
+
+
+def checkProjectFolder(path):
+	"""(folder, "") when path may be a project folder, else (None, reason). Looks at the text (and the
+	drive type) before anything touches the folder, so a network path is never contacted.
+	"""
+	if not path:
+		return None, projectSafety.REASON_EMPTY
+	return projectSafety.checkResolved(path)
+
+
+def projectRefusalText(path, reason):
+	"""Why a folder cannot be a project folder, in plain words."""
+	texts = {
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_NOT_ABSOLUTE: _("it is not a full path on a local drive"),
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_NETWORK: _("network and device paths are not allowed"),
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_DRIVE_ROOT: _("a whole drive cannot be a project folder"),
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_NOT_FIXED: _("it is not on a fixed local drive (removable, network and CD drives are not allowed)"),
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_SYSTEM: _("it is a Windows, program or startup folder"),
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_PROFILE: _("your whole user folder cannot be a project folder"),
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_APPDATA: _("it is inside the AppData folder, where programs keep their settings"),
+		# Translators: Why a folder cannot be a project folder.
+		projectSafety.REASON_ADDON_DATA: _("it is inside Ask AI's own data folder"),
+	}
+	# Translators: Error when a folder cannot be used. {folder} is the path, {reason} why.
+	return _("{folder} cannot be a project folder: {reason}. Choose a folder of your own, for example in Documents.").format(
+		folder=path,
+		reason=texts.get(reason, reason),
+	)
+
+
+def dropUnsafeProjectFolder(conversation):
+	"""Remove a project folder that may not be used (for example from an edited or synced file).
+	Returns a spoken explanation, or "".
+	"""
+	if not conversation.projectFolder:
+		return ""
+	_folder, reason = checkProjectFolder(conversation.projectFolder)
+	if not reason:
+		return ""
+	path = conversation.projectFolder
+	conversation.projectFolder = ""
+	log.warning("Ask AI: removed an unsafe project folder from a conversation: %s (%s)" % (path, reason))
+	# Translators: Announced when a conversation's project folder was refused. {text} explains why.
+	return _("The project folder was removed. {text}").format(text=projectRefusalText(path, reason))
+
+
+def existingProjectFolder(conversation):
+	"""The conversation's project folder if it is allowed and exists, else "". Checked before touching it."""
+	folder, reason = checkProjectFolder(conversation.projectFolder)
+	if reason:
+		return ""
+	return folder if os.path.isdir(folder) else ""
+
+
+def openProjectFolder(path, parent=None):
+	folder, reason = checkProjectFolder(path)
+	if reason:
+		if path:
+			showError(projectRefusalText(path, reason), parent)
+		return
+	if not os.path.isdir(folder):
+		# Translators: Error when the project folder was moved or deleted. {path} is the folder.
+		showError(_("The project folder no longer exists: {path}. Choose another folder or clear it.").format(path=folder), parent)
+		return
+	try:
+		os.startfile(folder)
+	except Exception as e:
+		log.error("Ask AI: could not open the project folder", exc_info=True)
+		# Translators: Error when Explorer could not open the folder. {error} is the reason.
+		showError(_("Could not open the folder: {error}").format(error=e), parent)
+
+
+def projectGrants():
+	try:
+		return list(getConf()["projectGrants"])
+	except Exception:
+		return []
+
+
+def writeConsent(conversation, parent=None):
+	"""Whether the AI may write in the conversation's project folder for this request. The first time a folder
+	is used with writing allowed, the user is asked once; Yes is kept in askAI.projectGrants (NVDA
+	configuration, never the conversation file). Without consent the request runs read-only.
+	"""
+	if not conversation.projectFolder or not getConf()["allowProjectWrites"]:
+		return False
+	folder, reason = checkProjectFolder(conversation.projectFolder)
+	if reason:
+		return False
+	grants = projectGrants()
+	if projectSafety.hasGrant(grants, folder):
+		return True
+	# Translators: Asked the first time the AI could write in a project folder. {folder} is the folder.
+	question = _("Allow the AI to create and change files in {folder}?").format(folder=folder)
+	# Translators: Title of the question about writing in the project folder.
+	if askYesNo(question, _("Project folder"), parent):
+		getConf()["projectGrants"] = projectSafety.addGrant(grants, folder)
+		return True
+	return False
+
+
+def requestRefusal(conversation):
+	"""A reason why the question cannot be sent as it is, or ""."""
+	if conversation.projectFolder:
+		_folder, reason = checkProjectFolder(conversation.projectFolder)
+		if reason:
+			return projectRefusalText(conversation.projectFolder, reason)
+	providerId = conversation.provider if providers.isKnown(conversation.provider) else providers.DEFAULT_PROVIDER
+	if not providers.get(providerId).readsOtherFiles:
+		others = [item.name for item in state.pendingAttachments if item.kind == attachments.KIND_FILE]
+		if others:
+			# Translators: Error when files other than text and images are attached for ChatGPT. {files} lists them.
+			return _(
+				"ChatGPT can only receive text files and images; Claude can read other files. "
+				"Remove {files}, or switch this conversation to Claude in Conversation options."
+			).format(files=", ".join(others))
+	return ""
+
+
+def clearScreenContext():
+	"""Screen text and the screenshot choice are for one question only and never carried along silently."""
+	state.pendingContext = None
+	state.includeScreenshot = False
+
+
+def contextSummaryTemplates():
+	return {
+		# Translators: Summary of attached screen text. {app} e.g. "Word", {count} e.g. "1,240".
+		"selection": _("Selected text from {app}, {count} characters"),
+		# Translators: Summary of attached screen text that was shortened. {count} is "20,000".
+		"selectionCut": _("Selected text from {app}, cut to {count} characters"),
+		# Translators: Summary of attached screen text. {role} e.g. "document", {app} e.g. "Edge".
+		"object": _("Text of the current object ({role}) from {app}, {count} characters"),
+		# Translators: Summary of attached screen text that was shortened.
+		"objectCut": _("Text of the current object ({role}) from {app}, cut to {count} characters"),
+		# Translators: Summary of attached screen text without a known object type.
+		"objectNoRole": _("Text of the current object from {app}, {count} characters"),
+		# Translators: Summary of attached screen text without a known object type, shortened.
+		"objectNoRoleCut": _("Text of the current object from {app}, cut to {count} characters"),
+		# Translators: Used when the application is unknown, as in "Selected text from the screen".
+		"theScreen": _("the screen"),
+	}
+
+
+def contextSummary(context):
+	return context.summary(contextSummaryTemplates())
+
+
+def screenshotLabel(window):
+	if window:
+		# Translators: Checkbox to send a picture of the window. {window} is the window title.
+		return _("Incl&ude a screenshot of {window} (everything visible in it)").format(window=window)
+	# Translators: Checkbox to send a picture of the window, when its title is unknown.
+	return _("Incl&ude a screenshot of the window (everything visible in it)")
+
+
+def localClock(timestamp):
+	"""Time in the Windows locale (NVDA's winKernel.GetTimeFormatEx, as NVDA's own time command), with the
+	date when it is not today; the 12-hour fallback elsewhere.
+	"""
+	import datetime
+
+	try:
+		import winKernel
+
+		moment = datetime.datetime.fromtimestamp(timestamp)
+		text = winKernel.GetTimeFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, winKernel.TIME_NOSECONDS, moment, None)
+		if moment.date() != datetime.date.today():
+			date = winKernel.GetDateFormatEx(winKernel.LOCALE_NAME_USER_DEFAULT, getattr(winKernel, "DATE_SHORTDATE", 1), moment, None)
+			text = "%s %s" % (date, text)
+		if text:
+			return text
+	except Exception:
+		pass
+	return statusText.formatClock(timestamp)
+
+
+def offerToRemoveOldAddon(parent=None):
+	"""The first time Ask AI is opened while Ask GPT 1.x is still installed and enabled (both would take
+	NVDA+Alt+G), ask whether to remove it. The answer is recorded only after an explicit Yes or No;
+	Escape asks again next time.
+	"""
+	conf = getConf()
+	if conf["askedToRemoveAskGPT"]:
+		return
+	oldAddon = findOldAddon()
+	if oldAddon is None:
+		return
+	answer = askYesNoOrLater(
+		# Translators: Asked once when the old Ask GPT add-on is still installed next to Ask AI.
+		_("The old Ask GPT add-on is still installed. Remove it now? (Restart NVDA afterwards.)"),
+		# Translators: Title of the question about removing the old add-on.
+		_("Ask AI"),
+		parent,
+	)
+	if answer is None:
+		return
+	conf["askedToRemoveAskGPT"] = True
+	if answer:
+		removeOldAddon(oldAddon)
+
+
+def findOldAddon():
+	try:
+		return migration.findOldAddon(addonHandler.getAvailableAddons())
+	except Exception:
+		log.debugWarning("Ask AI: could not list add-ons", exc_info=True)
+		return None
+
+
+def removeOldAddon(oldAddon):
+	try:
+		# Addon.requestRemove() (NVDA 2024.1 to 2026.x) marks it for removal at the next restart.
+		oldAddon.requestRemove()
+	except Exception:
+		log.error("Ask AI: could not remove the Ask GPT add-on", exc_info=True)
+		# Translators: Error when the old add-on could not be marked for removal.
+		showError(_("Ask GPT could not be removed. Remove it in NVDA menu, Tools, Add-on Store, Installed add-ons."))
+		return False
+	try:
+		from gui import addonGui
+
+		wx.CallAfter(addonGui.promptUserForRestart)
+	except Exception:
+		# Translators: Announced after the old add-on was marked for removal.
+		ui.message(_("Ask GPT will be removed when NVDA restarts."))
+	return True
 
 
 class PendingRequest:
@@ -284,8 +556,10 @@ def providerSettings(providerId):
 	return conf[keys["path"]], conf[keys["model"]], conf[keys["effort"]]
 
 
-def makeClient(executablePath=None, conversation=None, providerId=None):
-	"""A provider instance for the conversation's service (or providerId, or the default service)."""
+def makeClient(executablePath=None, conversation=None, providerId=None, allowWrites=None):
+	"""A provider instance for the conversation's service (or providerId, or the default service).
+	allowWrites: whether this request may write in the project folder (see writeConsent); None means no.
+	"""
 	if conversation is not None:
 		providerId = conversation.provider if providers.isKnown(conversation.provider) else providers.DEFAULT_PROVIDER
 	providerId = providerId or defaultProvider()
@@ -309,7 +583,7 @@ def makeClient(executablePath=None, conversation=None, providerId=None):
 		reasoningEffort=effort,
 		timeout=conf["timeout"],
 		projectFolder=projectFolder,
-		allowProjectWrites=conf["allowProjectWrites"],
+		allowProjectWrites=bool(allowWrites) and conf["allowProjectWrites"],
 	)
 
 
@@ -334,9 +608,14 @@ def transcriptEntries(conversation):
 	return entries
 
 
-def fileChangesText(created, changed):
-	"""One line such as "Created: a.docx, b.pdf. Changed: x.txt", or "" when nothing changed."""
+def fileChangesText(created, changed, many=False):
+	"""One line such as "Created: a.docx, b.pdf. Changed: x.txt", or "" when nothing changed.
+	many: the folder had too many files to compare them all.
+	"""
 	parts = []
+	if many:
+		# Translators: Announced after an answer when the project folder has too many files to list changes.
+		parts.append(_("Many files changed or the folder is too large to list the changes"))
 	for names, template in (
 		# Translators: Lists files the AI created in the project folder. {files} is a comma-separated list.
 		(created, _("Created: {files}")),
@@ -615,15 +894,15 @@ def saveDocument(parent, folder, formatKey, baseName, docTitle, blocks, markdown
 # Request lifecycle (main thread unless noted)
 
 
-def buildRequestPrompt(question, conversation, attachmentSection=""):
+def buildRequestPrompt(question, conversation, attachmentSection="", allowWrites=False):
 	"""The prompt for a question: instructions (with the service's project folder rules), earlier
 	conversation, attached screen text and files (fenced, as data), then the question.
 	"""
 	conf = getConf()
-	history = conversation.history if conf["keepContext"] else []
+	history = conversation.historyItems if conf["keepContext"] else []
 	projectInstructions = ""
 	if conversation.projectFolder:
-		projectInstructions = providers.get(conversation.provider).projectInstructions(conf["allowProjectWrites"])
+		projectInstructions = providers.get(conversation.provider).projectInstructions(bool(allowWrites))
 	return providerBase.buildPrompt(
 		question,
 		history,
@@ -633,11 +912,15 @@ def buildRequestPrompt(question, conversation, attachmentSection=""):
 	)
 
 
-def startRequest(question, conversation):
+def startRequest(question, conversation, allowWrites=False):
 	"""Send question with whatever is attached (screen context, screenshot, files). Main thread.
 	A question over attachments.LONG_QUESTION_CHARS is sent as an attached file, question.txt.
 	The attachments apply to this question only and are cleared afterwards.
+	@raise RequestRefused: unsafe project folder, or files the service cannot read.
 	"""
+	refusal = requestRefusal(conversation)
+	if refusal:
+		raise RequestRefused(refusal)
 	providerId = conversation.provider if providers.isKnown(conversation.provider) else providers.DEFAULT_PROVIDER
 	items = list(state.pendingAttachments)
 	longAttachment, sentQuestion = attachments.longQuestion(question)
@@ -651,7 +934,7 @@ def startRequest(question, conversation):
 		directory = attachments.RequestFiles.create(workDir or providerBase.defaultWorkDir())
 		plan = attachments.RequestPlan(directory, items, context, screenshot)
 		section = plan.promptSection(providers.get(providerId).imagesAttachedDirectly)
-	prompt = buildRequestPrompt(sentQuestion, conversation, section)
+	prompt = buildRequestPrompt(sentQuestion, conversation, section, allowWrites)
 	shownQuestion = question if longAttachment is None else "%s (%s)" % (sentQuestion, longAttachment.name)
 	conversation.addMessage(
 		conversations.ROLE_USER,
@@ -667,7 +950,7 @@ def startRequest(question, conversation):
 		log.debugWarning("Ask AI: could not save the question history", exc_info=True)
 	state.clearPendingInput()
 	pending = PendingRequest(
-		makeClient(conversation=conversation),
+		makeClient(conversation=conversation, allowWrites=allowWrites),
 		shownQuestion,
 		conversation.id,
 		conversation.projectFolder,
@@ -717,7 +1000,10 @@ def _requestWorker(pending, prompt):
 	created, changed = (), ()
 	if before is not None:
 		try:
-			created, changed = folderSnapshot.compare(before, folderSnapshot.snapshot(pending.projectFolder))
+			after = folderSnapshot.snapshot(pending.projectFolder)
+			created, changed = folderSnapshot.compare(before, after)
+			if folderSnapshot.isTruncated(before, after):
+				pending.manyChanges = True
 		except Exception:
 			log.debugWarning("Ask AI: could not compare the project folder", exc_info=True)
 	wx.CallAfter(_onRequestDone, pending, answer, None, created, changed)
@@ -740,17 +1026,18 @@ def cancelRequest():
 def statusTemplates():
 	"""Translated templates for status.statusText / doneText / failedText."""
 	return {
-		# Translators: Status report while an answer is coming. {service} is "ChatGPT" or "Claude",
-		# {title} the conversation title, {elapsed} e.g. "40 seconds".
-		"answering": _("{service} is answering in {title}, {elapsed}."),
+		# Translators: Status report while an answer is coming. {service} e.g. "ChatGPT", {elapsed} e.g.
+		# "40 seconds", {title} the conversation title.
+		"answering": _("{service}, working for {elapsed}. Conversation: {title}."),
+		# Translators: Status report right after a question was sent.
+		"answeringJustStarted": _("{service}, just started. Conversation: {title}."),
 		# Translators: Status report while voice typing keeps NVDA quiet.
 		"dictating": _("Dictating."),
 		# Translators: Status report while a sign-in waits for the browser.
 		"signingIn": _("Waiting for sign-in."),
 		# Translators: Status report when the current service is signed out. {service} is "ChatGPT" or "Claude".
-		"notSignedIn": _("Not signed in to {service}"),
-		# Translators: Status report when nothing is running. {service} is "ChatGPT" or "Claude",
-		# {time} e.g. "3:05 PM", {title} the conversation title.
+		"notSignedIn": _("Not signed in to {service}."),
+		# Translators: Status report when nothing is running. {time} is a time such as "15:05".
 		"idleWithAnswer": _("Idle. Last answer from {service} at {time} in {title}."),
 		# Translators: Status report when nothing is running and there is no answer yet.
 		"idle": _("Idle."),
@@ -760,11 +1047,23 @@ def statusTemplates():
 		"oneSecond": _("1 second"),
 		# Translators: A duration, e.g. "2 minutes 5 seconds".
 		"minutes": _("{minutes} minutes {seconds} seconds"),
-		# Translators: Spoken before an answer that arrives while the user works in another app. {title} is the conversation.
-		"done": _("Done: {title}."),
+		# Translators: Spoken before an answer that arrives while the user works in another app.
+		"done": _("Ask AI answer, {title}:"),
 		# Translators: Spoken when a question fails while the user works in another app. {reason} explains why.
 		"failed": _("Failed: {title}. {reason}"),
+		# Translators: As "failed", for a title that already ends with "?" or "!".
+		"failedQuestion": _("Failed: {title} {reason}"),
 		"untitled": _("Untitled conversation"),
+		# Translators: One attached file, in the status report.
+		"oneFile": _("1 file"),
+		# Translators: Several attached files, in the status report. {count} is a number.
+		"files": _("{count} files"),
+		# Translators: Status report part. {app} e.g. "Word", {files} e.g. "2 files".
+		"attachedBoth": _("Context from {app} and {files} attached to the next question."),
+		# Translators: Status report part. {app} e.g. "Word".
+		"attachedContext": _("Context from {app} attached to the next question."),
+		# Translators: Status report part. {files} e.g. "2 files".
+		"attachedFiles": _("{files} attached to the next question."),
 	}
 
 
@@ -794,7 +1093,7 @@ def _onRequestDone(pending, answer, error, created, changed):
 		state.lastAnswerInfo = (pending.providerId, time.time(), title)
 		if state.loginStates.get(pending.providerId) != providerBase.STATE_API_KEY:
 			state.loginStates[pending.providerId] = providerBase.STATE_SUBSCRIPTION
-		changes = fileChangesText(created, changed)
+		changes = fileChangesText(created, changed, getattr(pending, "manyChanges", False))
 		if changes:
 			conversation.addMessage(conversations.ROLE_NOTE, changes)
 		state.save(conversation)
@@ -836,6 +1135,7 @@ def currentStatus(now=None):
 	if state.lastAnswerInfo is not None:
 		answerProvider, answeredAt, answerTitle = state.lastAnswerInfo
 		lastAnswer = (serviceName(answerProvider), answeredAt, answerTitle)
+	context = state.pendingContext
 	snapshot = statusText.StatusSnapshot(
 		answering=answering,
 		dictating=_activeDictation is not None,
@@ -843,8 +1143,10 @@ def currentStatus(now=None):
 		service=serviceName(providerId),
 		signedOut=state.loginStates.get(providerId) == providerBase.STATE_SIGNED_OUT,
 		lastAnswer=lastAnswer,
+		contextApp=(context.appName or context.windowName) if context is not None else "",
+		attachedFiles=len(state.pendingAttachments),
 	)
-	return statusText.statusText(snapshot, now, statusTemplates())
+	return statusText.statusText(snapshot, now, statusTemplates(), clock=localClock)
 
 
 def switchConversation(conversation):
@@ -856,9 +1158,15 @@ def switchConversation(conversation):
 		if dialog is not None:
 			dialog.saveDraft(silent=True)
 		state.save(state.current)
+	# Screen text and the screenshot choice belonged to the old conversation's next question.
+	clearScreenContext()
 	state.current = conversation
+	restored = False
 	if dialog is not None:
-		dialog.loadConversation(restoreDraft=True)
+		dialog.questionCtrl.Clear()
+		restored = dialog.loadConversation(restoreDraft=True)
+		dialog.updatePendingInput()
+	return restored
 
 
 def cancelLogin():
@@ -948,15 +1256,280 @@ def shutdown():
 			state.pending = None
 			pending.cancelEvent.set()
 			pending.client.terminate()
+			if pending.plan is not None:
+				attachments.RequestFiles.remove(pending.plan.directory)
 		cancelLogin()
 		if state.current is not None:
 			state.save(state.current)
 		closeAskDialog()
 
 
+class YesNoDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
+	"""Yes / No question where Escape means "not now" (returns None), for questions that must only be
+	recorded after an explicit answer.
+	"""
+
+	def __init__(self, parent, message, title):
+		super().__init__(parent, title=title)
+		sizer = wx.BoxSizer(wx.VERTICAL)
+		text = wx.StaticText(self, label=message)
+		text.Wrap(self.scaleSize(420))
+		sizer.Add(text, flag=wx.ALL, border=guiHelper.BORDER_FOR_DIALOGS)
+		buttons = guiHelper.ButtonHelper(wx.HORIZONTAL)
+		# Translators: Button in a Yes/No question.
+		yes = buttons.addButton(self, id=wx.ID_YES, label=_("&Yes"))
+		# Translators: Button in a Yes/No question.
+		buttons.addButton(self, id=wx.ID_NO, label=_("&No"))
+		sizer.Add(buttons.sizer, flag=wx.ALL | wx.ALIGN_RIGHT, border=guiHelper.BORDER_FOR_DIALOGS)
+		self.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(evt.GetId()))
+		self.SetEscapeId(wx.ID_CANCEL)
+		self.SetSizerAndFit(sizer)
+		self.CentreOnScreen()
+		yes.SetDefault()
+		yes.SetFocus()
+
+
+def askYesNoOrLater(message, title, parent=None):
+	"""True for Yes, False for No, None when dismissed with Escape. Main thread."""
+	gui.mainFrame.prePopup()
+	try:
+		dialog = YesNoDialog(parent or gui.mainFrame, message, title)
+		dialog.Raise()
+		result = dialog.ShowModal()
+		dialog.Destroy()
+	finally:
+		gui.mainFrame.postPopup()
+	if result == wx.ID_YES:
+		return True
+	if result == wx.ID_NO:
+		return False
+	return None
+
+
+def effortName(effort):
+	"""Short effort name for the options summary ("medium effort")."""
+	names = {
+		# Translators: Reasoning effort in a sentence such as "Claude, Opus, medium effort".
+		"minimal": _("minimal"),
+		# Translators: Reasoning effort in a sentence such as "Claude, Opus, low effort".
+		"low": _("low"),
+		# Translators: Reasoning effort in a sentence such as "Claude, Opus, medium effort".
+		"medium": _("medium"),
+		# Translators: Reasoning effort in a sentence such as "Claude, Opus, high effort".
+		"high": _("high"),
+		# Translators: Reasoning effort in a sentence such as "Claude, Opus, extra high effort".
+		"xhigh": _("extra high"),
+		# Translators: Reasoning effort in a sentence such as "Claude, Opus, maximum effort".
+		"max": _("maximum"),
+		# Translators: Reasoning effort in a sentence such as "Claude, Opus, ultra effort".
+		"ultra": _("ultra"),
+	}
+	return names.get(effort, effort)
+
+
+def optionsSummary(conversation):
+	""""Claude, Opus, medium effort, no project folder." for the options just applied."""
+	providerId = conversation.provider if providers.isKnown(conversation.provider) else defaultProvider()
+	model = modelCatalog.findModel(state.modelsFor(providerId), conversation.model) if conversation.model else None
+	# Translators: The model in the options summary when the service picks it.
+	modelText = model.displayName if model else (conversation.model or _("default model"))
+	if conversation.projectFolder:
+		# Translators: Part of the options summary. {folder} is the project folder.
+		project = _("project folder {folder}").format(folder=conversation.projectFolder)
+	else:
+		# Translators: Part of the options summary when the conversation has no project folder.
+		project = _("no project folder")
+	# Translators: Summary after Conversation options, e.g. "Claude, Opus, medium effort, no project folder."
+	return _("{service}, {model}, {effort} effort, {project}.").format(
+		service=serviceName(providerId),
+		model=modelText,
+		effort=effortName(conversation.reasoningEffort or providerSettings(providerId)[2]),
+		project=project,
+	)
+
+
+class ConversationOptionsDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
+	"""AI service, model, reasoning effort and project folder of one conversation. Nothing changes until OK.
+	Mnemonics: S M E J F X L (OK and Cancel are Enter and Escape).
+	"""
+
+	FOCUS_SERVICE = "service"
+	FOCUS_MODEL = "model"
+	FOCUS_EFFORT = "effort"
+	FOCUS_PROJECT = "project"
+
+	def __init__(self, parent, conversation, focus=None):
+		# Translators: Title of the conversation options dialog.
+		super().__init__(parent, title=_("Conversation options"))
+		self.conversation = conversation
+		self._providerIds = providers.ids()
+		self._provider = conversation.provider if providers.isKnown(conversation.provider) else defaultProvider()
+		# Per service: (model, effort), from this conversation, else the service's defaults.
+		self._choices = {}
+		for providerId in self._providerIds:
+			remembered = conversation.settingsFor(providerId)
+			if providerId == self._provider:
+				remembered = (conversation.model, conversation.reasoningEffort)
+			if remembered is None:
+				_path, model, effort = providerSettings(providerId)
+				remembered = (model, effort)
+			self._choices[providerId] = list(remembered)
+		self._projectFolder = conversation.projectFolder
+		self._modelSlugs = []
+		self._effortValues = []
+		width = self.scaleSize(420)
+		mainSizer = wx.BoxSizer(wx.VERTICAL)
+		sHelper = guiHelper.BoxSizerHelper(self, orientation=wx.VERTICAL)
+		self.serviceChoice = sHelper.addLabeledControl(
+			# Translators: Label of the choice of AI service (ChatGPT or Claude) for this conversation.
+			_("AI &service:"),
+			wx.Choice,
+			choices=[providers.displayName(pid) for pid in self._providerIds],
+		)
+		self.serviceChoice.SetSelection(self._providerIds.index(self._provider))
+		self.serviceChoice.Bind(wx.EVT_CHOICE, self.onServiceChoice)
+		self.modelChoice = sHelper.addLabeledControl(
+			# Translators: Label of the model choice for this conversation.
+			_("&Model:"),
+			wx.Choice,
+			choices=[],
+		)
+		self.modelChoice.Bind(wx.EVT_CHOICE, self.onModelChoice)
+		self.effortChoice = sHelper.addLabeledControl(
+			# Translators: Label of the reasoning effort choice for this conversation.
+			_("Reasoning &effort:"),
+			wx.Choice,
+			choices=[],
+		)
+		self.effortChoice.Bind(wx.EVT_CHOICE, self.onEffortChoice)
+		self.projectCtrl = sHelper.addLabeledControl(
+			# Translators: Label of the read-only field showing this conversation's project folder.
+			_("Pro&ject folder:"),
+			wx.TextCtrl,
+			style=STATUS_STYLE,
+			size=(width, -1),
+		)
+		self.projectCtrl.SetInitialSize((width, int(self.projectCtrl.GetCharHeight() * 1.6)))
+		projectButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
+		# Translators: Button to choose the project folder where the AI may read and save files.
+		self.chooseProjectButton = projectButtons.addButton(self, label=_("Choose project &folder..."))
+		self.chooseProjectButton.Bind(wx.EVT_BUTTON, self.onChooseProject)
+		# Translators: Button that opens the project folder in Windows Explorer.
+		self.openProjectButton = projectButtons.addButton(self, label=_("Open folder in E&xplorer"))
+		self.openProjectButton.Bind(wx.EVT_BUTTON, self.onOpenProject)
+		# Translators: Button that removes the project folder from this conversation.
+		self.clearProjectButton = projectButtons.addButton(self, label=_("C&lear project folder"))
+		self.clearProjectButton.Bind(wx.EVT_BUTTON, self.onClearProject)
+		sHelper.addItem(projectButtons)
+		sHelper.addDialogDismissButtons(self.CreateStdDialogButtonSizer(wx.OK | wx.CANCEL), separated=True)
+		mainSizer.Add(sHelper.sizer, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.ALL)
+		self.SetSizerAndFit(mainSizer)
+		self.CentreOnScreen()
+		self._fillModels()
+		self._updateProject()
+		target = {
+			self.FOCUS_MODEL: self.modelChoice,
+			self.FOCUS_EFFORT: self.effortChoice,
+			self.FOCUS_PROJECT: self.projectCtrl,
+		}.get(focus, self.serviceChoice)
+		target.SetFocus()
+
+	def _models(self):
+		return state.modelsFor(self._provider)
+
+	def _fillModels(self):
+		model, effort = self._choices[self._provider]
+		providerClass = providers.get(self._provider)
+		_path, defaultModel, _defaultEffort = providerSettings(self._provider)
+		models = modelCatalog.modelChoices(self._models(), extraSlugs=[model, defaultModel], efforts=providerClass.defaultEfforts)
+		self._modelSlugs = [""] + [item.slug for item in models]
+		self.modelChoice.Set([defaultModelLabel()] + [item.displayName for item in models])
+		self.modelChoice.SetSelection(self._modelSlugs.index(model) if model in self._modelSlugs else 0)
+		self._fillEfforts()
+
+	def _fillEfforts(self):
+		model, wanted = self._choices[self._provider]
+		fallback = providers.get(self._provider).defaultEfforts
+		efforts = modelCatalog.effortsFor(self._models(), model, fallback)
+		effort = modelCatalog.pickEffort(self._models(), model, wanted or providerSettings(self._provider)[2], fallback)
+		self._choices[self._provider][1] = effort
+		self._effortValues = list(efforts)
+		self.effortChoice.Set([effortLabel(value) for value in efforts])
+		self.effortChoice.SetSelection(self._effortValues.index(effort) if effort in self._effortValues else 0)
+
+	def onServiceChoice(self, evt):
+		selection = self.serviceChoice.GetSelection()
+		if selection >= 0:
+			self._provider = self._providerIds[selection]
+			self._fillModels()
+
+	def onModelChoice(self, evt):
+		selection = self.modelChoice.GetSelection()
+		if selection >= 0:
+			self._choices[self._provider][0] = self._modelSlugs[selection]
+			self._fillEfforts()
+
+	def onEffortChoice(self, evt):
+		selection = self.effortChoice.GetSelection()
+		if selection >= 0:
+			self._choices[self._provider][1] = self._effortValues[selection]
+
+	def _updateProject(self):
+		# Translators: Shown in the project folder field when no folder is set.
+		self.projectCtrl.SetValue(self._projectFolder or _("None"))
+		self.openProjectButton.Enable(bool(self._projectFolder))
+		self.clearProjectButton.Enable(bool(self._projectFolder))
+
+	def onChooseProject(self, evt):
+		current, _reason = checkProjectFolder(self._projectFolder)
+		start = current if current and os.path.isdir(current) else documentsFolder()
+		with wx.DirDialog(
+			self,
+			# Translators: Title of the folder chooser for the project folder.
+			_("Choose the project folder for this conversation"),
+			defaultPath=start if os.path.isdir(start) else "",
+			style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST,
+		) as folderDialog:
+			if folderDialog.ShowModal() != wx.ID_OK:
+				return
+			chosen = folderDialog.GetPath()
+		folder, reason = checkProjectFolder(chosen)
+		if reason:
+			showError(projectRefusalText(chosen, reason), self)
+			return
+		self._projectFolder = folder
+		self._updateProject()
+		name = os.path.basename(os.path.normpath(folder)) or folder
+		# Translators: Announced after choosing the project folder. {name} is the folder name.
+		announceWhenFocused(self.chooseProjectButton, _("Project folder: {name}").format(name=name))
+
+	def onOpenProject(self, evt):
+		openProjectFolder(self._projectFolder, self)
+
+	def onClearProject(self, evt):
+		self._projectFolder = ""
+		self._updateProject()
+		self.chooseProjectButton.SetFocus()
+		# Translators: Announced after removing the project folder.
+		announceWhenFocused(self.chooseProjectButton, _("Project folder cleared"))
+
+	def apply(self):
+		"""Write the choices into the conversation (OK). Returns the spoken summary."""
+		conversation = self.conversation
+		for providerId, (model, effort) in self._choices.items():
+			conversation.serviceSettings[providerId] = {"model": model, "effort": effort}
+		conversation.provider = self._provider
+		conversation.model, conversation.reasoningEffort = self._choices[self._provider]
+		conversation.projectFolder = self._projectFolder
+		conversation.touch()
+		state.save(conversation)
+		return optionsSummary(conversation)
+
+
 class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 	"""Non-modal dialog for asking questions. Only one instance exists at a time.
-	Mnemonics: Q A/C D T U H P I V O W S M E J F X L R N (Cancel shares the Ask button).
+	Mnemonics: Q A/C D T I U V O W H P R N (Cancel shares the Ask button). Hidden accelerators open
+	Conversation options on a field: Alt+S service, Alt+M model, Alt+E effort, Alt+J project folder.
 	Keys: Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+S save draft, Up / Down recall questions.
 	"""
 
@@ -979,9 +1552,6 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self._dictation = None
 		self._lastAnswerPos = None
 		self._shownEntries = []
-		self._modelSlugs = []
-		self._effortValues = []
-		self._providerIds = providers.ids()
 		self._recall = history.QuestionRecall()
 		# Start of the current search match in the Conversation text, or None.
 		self._matchStart = None
@@ -1010,66 +1580,34 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self.dictateButton.Bind(wx.EVT_BUTTON, self.onDictate)
 		sHelper.addItem(actionButtons)
 
-		# Screen text attached by "Ask about this" (NVDA+Alt+A); shown only while some is attached.
-		contextLabel = wx.StaticText(
+		# What goes with the next question (screen text and files); hidden while nothing is attached.
+		self.attachedLabel = wx.StaticText(
 			self,
-			# Translators: Label of the read-only field summarising the screen text attached to the next question.
-			label=_("Context:"),
+			# Translators: Label of the list of screen text and files attached to the next question.
+			label=_("Attached to next ques&tion:"),
 		)
-		self.contextCtrl = wx.TextCtrl(self, style=STATUS_STYLE, size=(width - self.scaleSize(200), -1))
-		self.contextCtrl.SetInitialSize((width - self.scaleSize(200), int(self.contextCtrl.GetCharHeight() * 1.6)))
-		self.removeContextButton = wx.Button(
+		self.attachedList = wx.ListBox(self, size=(width - self.scaleSize(140), self.scaleSize(50)))
+		self.attachedList.Bind(wx.EVT_KEY_DOWN, self.onAttachedListKey)
+		self.attachedList.Bind(wx.EVT_LISTBOX_DCLICK, lambda evt: self.reviewAttached())
+		self.removeAttachedButton = wx.Button(
 			self,
-			# Translators: Button that removes the screen text attached to the next question.
-			label=_("Remove con&text"),
+			# Translators: Button that removes the selected item from what is attached to the next question.
+			label=_("Remove &item"),
 		)
-		self.removeContextButton.Bind(wx.EVT_BUTTON, self.onRemoveContext)
-		self.screenshotCheck = wx.CheckBox(
-			self,
-			# Translators: Checkbox to send a picture of the window together with the attached screen text.
-			label=_("Incl&ude a screenshot of the window"),
-		)
+		self.removeAttachedButton.Bind(wx.EVT_BUTTON, lambda evt: self.removeAttached())
+		self.screenshotCheck = wx.CheckBox(self, label=screenshotLabel(""))
 		self.screenshotCheck.Bind(wx.EVT_CHECKBOX, self.onScreenshotCheck)
-		contextRow = wx.BoxSizer(wx.HORIZONTAL)
-		contextRow.Add(contextLabel, flag=wx.ALIGN_CENTER_VERTICAL)
-		contextRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
-		contextRow.Add(self.contextCtrl, proportion=1, flag=wx.ALIGN_CENTER_VERTICAL)
-		contextRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
-		contextRow.Add(self.removeContextButton, flag=wx.ALIGN_CENTER_VERTICAL)
-		self.contextBlock = wx.BoxSizer(wx.VERTICAL)
-		self.contextBlock.Add(contextRow, flag=wx.EXPAND)
-		self.contextBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
-		self.contextBlock.Add(self.screenshotCheck)
-		sHelper.addItem(self.contextBlock, flag=wx.EXPAND)
-
-		# Files attached to the next question.
-		attachRow = wx.BoxSizer(wx.HORIZONTAL)
-		self.attachButton = wx.Button(
-			self,
-			# Translators: Button that attaches files (documents, images) to the next question.
-			label=_("Attac&h files..."),
-		)
-		self.attachButton.Bind(wx.EVT_BUTTON, self.onAttachFiles)
-		attachmentsLabel = wx.StaticText(
-			self,
-			# Translators: Label of the list of files attached to the next question.
-			label=_("&Pending attachments:"),
-		)
-		self.attachmentsList = wx.ListBox(self, size=(self.scaleSize(260), self.scaleSize(50)))
-		self.removeAttachmentButton = wx.Button(
-			self,
-			# Translators: Button that removes the selected file from the attachments.
-			label=_("Remove f&ile"),
-		)
-		self.removeAttachmentButton.Bind(wx.EVT_BUTTON, self.onRemoveAttachment)
-		attachRow.Add(self.attachButton, flag=wx.ALIGN_CENTER_VERTICAL)
-		attachRow.AddSpacer(guiHelper.SPACE_BETWEEN_BUTTONS_HORIZONTAL)
-		attachRow.Add(attachmentsLabel, flag=wx.ALIGN_CENTER_VERTICAL)
-		attachRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
-		attachRow.Add(self.attachmentsList, proportion=1)
-		attachRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
-		attachRow.Add(self.removeAttachmentButton, flag=wx.ALIGN_CENTER_VERTICAL)
-		sHelper.addItem(attachRow, flag=wx.EXPAND)
+		attachedRow = wx.BoxSizer(wx.HORIZONTAL)
+		attachedRow.Add(self.attachedList, proportion=1)
+		attachedRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+		attachedRow.Add(self.removeAttachedButton, flag=wx.ALIGN_CENTER_VERTICAL)
+		self.attachedBlock = wx.BoxSizer(wx.VERTICAL)
+		self.attachedBlock.Add(self.attachedLabel)
+		self.attachedBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		self.attachedBlock.Add(attachedRow, flag=wx.EXPAND)
+		self.attachedBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		self.attachedBlock.Add(self.screenshotCheck)
+		sHelper.addItem(self.attachedBlock, flag=wx.EXPAND)
 
 		self.conversationCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the read-only box showing the conversation.
@@ -1086,54 +1624,13 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		# Translators: Button that saves the last answer as a Word, PDF or other file.
 		self.saveButton = answerButtons.addButton(self, label=_("Save ans&wer as..."))
 		self.saveButton.Bind(wx.EVT_BUTTON, self.onSaveAnswer)
+		# Translators: Button that attaches files (documents, images) to the next question.
+		self.attachButton = answerButtons.addButton(self, label=_("Attac&h files..."))
+		self.attachButton.Bind(wx.EVT_BUTTON, self.onAttachFiles)
+		# Translators: Button that opens the service, model, effort and project folder of this conversation.
+		self.optionsButton = answerButtons.addButton(self, label=_("Conversation o&ptions..."))
+		self.optionsButton.Bind(wx.EVT_BUTTON, lambda evt: self.openOptions())
 		sHelper.addItem(answerButtons)
-
-		self.serviceChoice = sHelper.addLabeledControl(
-			# Translators: Label of the choice of AI service (ChatGPT or Claude) for this conversation.
-			_("AI &service:"),
-			wx.Choice,
-			choices=[providers.displayName(pid) for pid in self._providerIds],
-		)
-		self.serviceChoice.Bind(wx.EVT_CHOICE, self.onServiceChoice)
-
-		modelRow = guiHelper.BoxSizerHelper(self, orientation=wx.HORIZONTAL)
-		self.modelChoice = modelRow.addLabeledControl(
-			# Translators: Label of the model choice for this conversation.
-			_("&Model:"),
-			wx.Choice,
-			choices=[],
-		)
-		self.modelChoice.Bind(wx.EVT_CHOICE, self.onModelChoice)
-		self.effortChoice = modelRow.addLabeledControl(
-			# Translators: Label of the reasoning effort choice for this conversation.
-			_("Reasoning &effort:"),
-			wx.Choice,
-			choices=[],
-		)
-		self.effortChoice.Bind(wx.EVT_CHOICE, self.onEffortChoice)
-		sHelper.addItem(modelRow)
-
-		self.projectCtrl = sHelper.addLabeledControl(
-			# Translators: Label of the read-only field showing this conversation's project folder.
-			_("Pro&ject folder:"),
-			wx.TextCtrl,
-			style=STATUS_STYLE,
-			size=(width - self.scaleSize(120), -1),
-		)
-		# One line high (see STATUS_STYLE).
-		self.projectCtrl.SetInitialSize((width - self.scaleSize(120), int(self.projectCtrl.GetCharHeight() * 1.6)))
-		projectButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
-		# Translators: Button to choose the project folder where the AI may read and save files.
-		chooseProjectButton = projectButtons.addButton(self, label=_("Choose project &folder..."))
-		chooseProjectButton.Bind(wx.EVT_BUTTON, self.onChooseProject)
-		self.chooseProjectButton = chooseProjectButton
-		# Translators: Button that opens the project folder in Windows Explorer.
-		self.openProjectButton = projectButtons.addButton(self, label=_("Open folder in E&xplorer"))
-		self.openProjectButton.Bind(wx.EVT_BUTTON, self.onOpenProject)
-		# Translators: Button that removes the project folder from this conversation.
-		self.clearProjectButton = projectButtons.addButton(self, label=_("C&lear project folder"))
-		self.clearProjectButton.Bind(wx.EVT_BUTTON, self.onClearProject)
-		sHelper.addItem(projectButtons)
 
 		bottomButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
 		# Translators: Button that opens the list of saved conversations.
@@ -1149,16 +1646,31 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 
 		mainSizer.Add(sHelper.sizer, proportion=1, border=guiHelper.BORDER_FOR_DIALOGS, flag=wx.ALL | wx.EXPAND)
 		self.SetSizer(mainSizer)
-		mainSizer.Fit(self)
-		self.CentreOnScreen()
+
+		# Alt+S, Alt+M, Alt+E and Alt+J open Conversation options on that field (no visible duplicate letters).
+		self._acceleratorFocus = {}
+		entries = []
+		for letter, focus in (
+			("S", ConversationOptionsDialog.FOCUS_SERVICE),
+			("M", ConversationOptionsDialog.FOCUS_MODEL),
+			("E", ConversationOptionsDialog.FOCUS_EFFORT),
+			("J", ConversationOptionsDialog.FOCUS_PROJECT),
+		):
+			commandId = wx.NewIdRef()
+			self._acceleratorFocus[int(commandId)] = focus
+			entries.append(wx.AcceleratorEntry(wx.ACCEL_ALT, ord(letter), commandId))
+			self.Bind(wx.EVT_MENU, self.onOptionsAccelerator, id=commandId)
+		self.SetAcceleratorTable(wx.AcceleratorTable(entries))
 
 		self.Bind(wx.EVT_CHAR_HOOK, self.onCharHook)
 		self.Bind(wx.EVT_CLOSE, self.onClose)
 		self.Bind(wx.EVT_TIMER, self.onBeepTimer, self.beepTimer)
 		self.Bind(wx.EVT_TIMER, self.onDictationTimer, self.dictationTimer)
 		state.reloadModels()
-		self.loadConversation(restoreDraft=True)
+		self.loadConversation(restoreDraft=True, announce=True)
 		self.updatePendingInput()
+		mainSizer.Fit(self)
+		self.CentreOnScreen()
 		if state.pending is not None:
 			self._setBusy(True)  # A question asked before the dialog was closed is still running.
 		self.questionCtrl.SetFocus()
@@ -1174,18 +1686,15 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		providerId = self.conversation.provider
 		return providerId if providers.isKnown(providerId) else providers.DEFAULT_PROVIDER
 
-	def loadConversation(self, restoreDraft=False):
-		"""Show the current conversation: title, Conversation box, service, model, effort and project folder.
-		With restoreDraft (opening or continuing it), its saved draft goes into an empty Question box.
+	def loadConversation(self, restoreDraft=False, announce=False):
+		"""Show the current conversation. With restoreDraft (opening or continuing it), its saved draft goes
+		into an empty Question box. Returns True when a draft was restored (announced if announce).
+		An unsafe project folder from the file is removed (and said).
 		"""
 		conversation = self.conversation
 		self._matchStart = None
 		self._recall.reset()
-		if restoreDraft and conversation.draft and not self.questionCtrl.GetValue().strip():
-			self.questionCtrl.SetValue(conversation.draft)
-			self.questionCtrl.SetInsertionPointEnd()
-			# Translators: Announced when a conversation opens with its unsent question.
-			wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS * 3, ui.message, _("Draft restored"))
+		refused = dropUnsafeProjectFolder(conversation)
 		self._updateTitle()
 		self._shownEntries = []
 		self._refreshConversationBox(rebuild=True)
@@ -1193,15 +1702,30 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			# Opening or switching lands on the beginning of the newest answer.
 			self.conversationCtrl.SetInsertionPoint(self._lastAnswerPos)
 			self.conversationCtrl.ShowPosition(self._lastAnswerPos)
-		self.serviceChoice.SetSelection(self._providerIds.index(self.providerId))
-		self._fillModelChoices()
-		self._updateProject()
-		return conversation
+		restored = False
+		if restoreDraft and conversation.draft and not self.questionCtrl.GetValue().strip():
+			self.questionCtrl.SetValue(conversation.draft)
+			self.questionCtrl.SetInsertionPointEnd()
+			restored = True
+		messages = []
+		if refused:
+			messages.append(refused)
+		if restored and announce:
+			# Translators: Announced when a conversation opens with its unsent question.
+			messages.append(_("Draft restored"))
+		if messages:
+			announceWhenFocused(self.questionCtrl, " ".join(messages))
+		return restored
 
 	def _updateTitle(self):
 		title = self.conversation.title
-		# Translators: Title of the Ask AI dialog with the conversation title, e.g. "Ask AI - Trip to Paris".
-		self.SetTitle(_("Ask AI - {title}").format(title=title) if title else _("Ask AI"))
+		service = serviceName(self.providerId)
+		if title:
+			# Translators: Title of the Ask AI dialog, e.g. "Ask AI – Trip to Paris – Claude".
+			self.SetTitle(_("Ask AI – {title} – {service}").format(title=title, service=service))
+		else:
+			# Translators: Title of the Ask AI dialog for a new conversation, e.g. "Ask AI – Claude".
+			self.SetTitle(_("Ask AI – {service}").format(service=service))
 
 	def _refreshConversationBox(self, rebuild=False):
 		"""Mirror the conversation into the box: append new entries, or rebuild when old ones changed."""
@@ -1236,138 +1760,20 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			ctrl.SetInsertionPoint(appendedAnswerPos)
 			ctrl.ShowPosition(appendedAnswerPos)
 
-	def _models(self):
-		return state.modelsFor(self.providerId)
+	# Conversation options
 
-	def _fillModelChoices(self):
+	def onOptionsAccelerator(self, evt):
+		self.openOptions(self._acceleratorFocus.get(evt.GetId()))
+
+	def openOptions(self, focus=None):
+		"""Conversation options (modal); nothing changes until OK, then one summary is spoken."""
 		conversation = self.conversation
-		providerClass = providers.get(self.providerId)
-		_path, defaultModel, _effort = providerSettings(self.providerId)
-		models = modelCatalog.modelChoices(
-			self._models(),
-			extraSlugs=[conversation.model, defaultModel],
-			efforts=providerClass.defaultEfforts,
-		)
-		self._modelSlugs = [""] + [model.slug for model in models]
-		self.modelChoice.Set([defaultModelLabel()] + [model.displayName for model in models])
-		self.modelChoice.SetSelection(self._modelSlugs.index(conversation.model) if conversation.model in self._modelSlugs else 0)
-		self._fillEffortChoices()
-
-	def _fillEffortChoices(self):
-		conversation = self.conversation
-		fallback = providers.get(self.providerId).defaultEfforts
-		efforts = modelCatalog.effortsFor(self._models(), conversation.model, fallback)
-		wanted = conversation.reasoningEffort or providerSettings(self.providerId)[2]
-		effort = modelCatalog.pickEffort(self._models(), conversation.model, wanted, fallback)
-		self._effortValues = list(efforts)
-		self.effortChoice.Set([effortLabel(value) for value in efforts])
-		self.effortChoice.SetSelection(self._effortValues.index(effort) if effort in self._effortValues else 0)
-
-	def _modelName(self, slug):
-		model = modelCatalog.findModel(self._models(), slug) if slug else None
-		if model is not None:
-			return model.displayName
-		return slug or defaultModelLabel()
-
-	def onServiceChoice(self, evt):
-		selection = self.serviceChoice.GetSelection()
-		if selection < 0:
-			return
-		providerId = self._providerIds[selection]
-		conversation = self.conversation
-		if providerId == conversation.provider:
-			return
-		_path, model, effort = providerSettings(providerId)
-		conversation.provider = providerId
-		conversation.model = model
-		conversation.reasoningEffort = effort
-		conversation.touch()
-		self._fillModelChoices()
-		state.save(conversation)
-		# Translators: Announced when the conversation switches service. {service} is "ChatGPT" or "Claude".
-		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, _("Now using {service}").format(service=serviceName(providerId)))
-
-	def onModelChoice(self, evt):
-		selection = self.modelChoice.GetSelection()
-		if selection < 0:
-			return
-		conversation = self.conversation
-		slug = self._modelSlugs[selection]
-		if slug == conversation.model:
-			return
-		conversation.model = slug
-		conversation.reasoningEffort = modelCatalog.pickEffort(
-			self._models(),
-			slug,
-			conversation.reasoningEffort or providerSettings(self.providerId)[2],
-			providers.get(self.providerId).defaultEfforts,
-		)
-		conversation.touch()
-		self._fillEffortChoices()
-		state.save(conversation)
-		# Translators: Announced when the model changes. {model} is e.g. "GPT 6.1 Sol".
-		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, _("Model changed to {model}").format(model=self._modelName(slug)))
-
-	def onEffortChoice(self, evt):
-		selection = self.effortChoice.GetSelection()
-		if selection < 0:
-			return
-		self.conversation.reasoningEffort = self._effortValues[selection]
-		self.conversation.touch()
-		state.save(self.conversation)
-
-	def _updateProject(self):
-		folder = self.conversation.projectFolder
-		# Translators: Shown in the project folder field when no folder is set.
-		self.projectCtrl.SetValue(folder or _("None"))
-		self.openProjectButton.Enable(bool(folder))
-		self.clearProjectButton.Enable(bool(folder))
-
-	def onChooseProject(self, evt):
-		conversation = self.conversation
-		start = conversation.projectFolder if os.path.isdir(conversation.projectFolder or "") else documentsFolder()
-		with wx.DirDialog(
-			self,
-			# Translators: Title of the folder chooser for the project folder.
-			_("Choose the project folder for this conversation"),
-			defaultPath=start if os.path.isdir(start) else "",
-			style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST,
-		) as folderDialog:
-			if folderDialog.ShowModal() != wx.ID_OK:
+		with ConversationOptionsDialog(self, conversation, focus) as optionsDialog:
+			if optionsDialog.ShowModal() != wx.ID_OK:
 				return
-			folder = folderDialog.GetPath()
-		conversation.projectFolder = folder
-		conversation.touch()
-		state.save(conversation)
-		self._updateProject()
-		name = os.path.basename(os.path.normpath(folder)) or folder
-		# Translators: Announced after choosing the project folder. {name} is the folder name.
-		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, _("Project folder: {name}").format(name=name))
-
-	def onOpenProject(self, evt):
-		folder = self.conversation.projectFolder
-		if not folder:
-			return
-		if not os.path.isdir(folder):
-			# Translators: Error when the project folder was moved or deleted. {path} is the folder.
-			showError(_("The project folder no longer exists: {path}. Choose another folder or clear it.").format(path=folder), self)
-			return
-		try:
-			os.startfile(folder)
-		except Exception as e:
-			log.error("Ask AI: could not open the project folder", exc_info=True)
-			# Translators: Error when Explorer could not open the folder. {error} is the reason.
-			showError(_("Could not open the folder: {error}").format(error=e), self)
-
-	def onClearProject(self, evt):
-		conversation = self.conversation
-		conversation.projectFolder = ""
-		conversation.touch()
-		state.save(conversation)
-		self._updateProject()
-		# This button is now disabled; move focus to a control that still works.
-		# Translators: Announced after removing the project folder.
-		self._announceAfterFocus(self.chooseProjectButton, _("Project folder cleared"))
+			summary = optionsDialog.apply()
+		self._updateTitle()
+		announceWhenFocused(self.questionCtrl if self.FindFocus() is None else self.FindFocus(), summary)
 
 	def onConversations(self, evt):
 		from .conversationManager import showConversationManager
@@ -1377,12 +1783,17 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 	def onNewConversation(self, evt):
 		if self._dictation is not None:
 			self._finishDictation(dictation.REASON_CLOSE)
+		self.saveDraft(silent=True)
 		if state.current is not None and not state.current.isEmpty:
 			state.save(state.current)
-		switchConversation(state.newConversation())
+		clearScreenContext()
+		state.current = state.newConversation()
 		self.questionCtrl.Clear()
+		self.loadConversation()
+		self.updatePendingInput()
+		self.questionCtrl.SetFocus()
 		# Translators: Announced when a new conversation starts.
-		self._announceAfterFocus(self.questionCtrl, _("New conversation started."))
+		announceWhenFocused(self.questionCtrl, _("New conversation started."))
 
 	# Drafts
 
@@ -1394,33 +1805,39 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		text = self.questionCtrl.GetValue()
 		if self._recall.shown is not None and text == self._recall.shown:
 			text = self._recall.typed  # A recalled earlier question is not a draft.
-		if text.strip() == conversation.draft.strip():
-			if not silent:
-				ui.message(_("Draft saved"))
-			return
-		conversation.draft = text if text.strip() else ""
-		conversation.touch()
-		state.save(conversation)
+		if text.strip() != conversation.draft.strip():
+			conversation.draft = text if text.strip() else ""
+			conversation.touch()
+			state.save(conversation)
 		if not silent:
 			# Translators: Announced after Ctrl+S saves the Question text as the conversation's draft.
 			ui.message(_("Draft saved"))
 
-	# Attached context and files
+	# What is attached to the next question
+
+	def _attachedItems(self):
+		"""("context", ScreenContext) and ("file", Attachment) in list order."""
+		items = []
+		if state.pendingContext is not None:
+			items.append(("context", state.pendingContext))
+		items.extend(("file", item) for item in state.pendingAttachments)
+		return items
 
 	def updatePendingInput(self):
-		"""Show the attached screen text and files (the Context row only while there is context)."""
+		"""Show what is attached; the whole block is hidden (no empty tab stop) when nothing is."""
 		if not self:
 			return
 		context = state.pendingContext
-		self.contextCtrl.SetValue(context.summary(contextSummaryTemplate()) if context is not None else "")
+		items = self._attachedItems()
+		labels = [contextSummary(item) if kind == "context" else attachmentLabel(item) for kind, item in items]
+		selection = self.attachedList.GetSelection()
+		self.attachedList.Set(labels)
+		if labels:
+			self.attachedList.SetSelection(min(max(selection, 0), len(labels) - 1))
+		self.screenshotCheck.SetLabel(screenshotLabel(context.windowName if context is not None else ""))
 		self.screenshotCheck.SetValue(state.includeScreenshot)
-		self.screenshotCheck.Enable(context is not None and context.screenshot is not None)
-		self.contextBlock.ShowItems(context is not None)
-		items = [attachmentLabel(item) for item in state.pendingAttachments]
-		self.attachmentsList.Set(items)
-		if items:
-			self.attachmentsList.SetSelection(0)
-		self.removeAttachmentButton.Enable(bool(items))
+		self.attachedBlock.ShowItems(bool(labels))
+		self.screenshotCheck.Show(context is not None)
 		self.Layout()
 		self.GetSizer().Fit(self)
 
@@ -1429,19 +1846,50 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		state.pendingContext = context
 		state.includeScreenshot = False
 		self.updatePendingInput()
-		where = context.appName or context.windowTitle
-		# Translators: Announced after "Ask about this". {app} is the application, e.g. "Microsoft Word".
-		self._announceAfterFocus(self.questionCtrl, _("Context attached from {app}. Type your question.").format(app=where))
-
-	def onRemoveContext(self, evt):
-		state.pendingContext = None
-		state.includeScreenshot = False
-		self.updatePendingInput()
-		# Translators: Announced after the attached screen text was removed.
-		self._announceAfterFocus(self.questionCtrl, _("Context removed"))
+		self.questionCtrl.SetFocus()
+		# Translators: Announced after "Ask about this". {summary} is e.g. "Selected text from Word, 1,240 characters".
+		announceWhenFocused(self.questionCtrl, _("Attached: {summary}. Type your question.").format(summary=contextSummary(context)))
 
 	def onScreenshotCheck(self, evt):
 		state.includeScreenshot = self.screenshotCheck.GetValue()
+
+	def onAttachedListKey(self, evt):
+		key = evt.GetKeyCode()
+		if key in (wx.WXK_DELETE, wx.WXK_NUMPAD_DELETE):
+			self.removeAttached()
+			return
+		if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER):
+			self.reviewAttached()
+			return
+		evt.Skip()
+
+	def reviewAttached(self):
+		"""Enter on the screen text: show it in a window to read with the arrow keys."""
+		index = self.attachedList.GetSelection()
+		items = self._attachedItems()
+		if 0 <= index < len(items) and items[index][0] == "context":
+			context = items[index][1]
+			# Translators: Title of the window showing the attached screen text.
+			ui.browseableMessage(context.text, _("Attached screen text"))
+
+	def removeAttached(self):
+		index = self.attachedList.GetSelection()
+		items = self._attachedItems()
+		if not (0 <= index < len(items)):
+			return
+		kind, item = items[index]
+		if kind == "context":
+			clearScreenContext()
+			# Translators: Announced after the attached screen text was removed.
+			message = _("Context removed")
+		else:
+			state.pendingAttachments.remove(index - (1 if state.pendingContext is not None else 0))
+			# Translators: Announced after removing an attachment. {name} is the file name.
+			message = _("Removed {name}").format(name=item.name)
+		self.updatePendingInput()
+		target = self.attachedList if self.attachedList.GetCount() else self.questionCtrl
+		target.SetFocus()
+		announceWhenFocused(target, message)
 
 	def onAttachFiles(self, evt):
 		with wx.FileDialog(
@@ -1459,9 +1907,10 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		if problems:
 			showError("\n".join(problems), self)
 		if added:
+			self.attachedList.SetFocus()
 			# Translators: Announced after attaching files. {count} is a number.
 			message = ngettext("{count} file attached", "{count} files attached", added).format(count=added)
-			self._announceAfterFocus(self.attachmentsList, message)
+			announceWhenFocused(self.attachedList, message)
 
 	def attachPaths(self, paths):
 		"""Attach files; returns (number added, [problem messages])."""
@@ -1476,19 +1925,13 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self.updatePendingInput()
 		return added, problems
 
-	def onRemoveAttachment(self, evt):
-		index = self.attachmentsList.GetSelection()
-		if index < 0 or index >= len(state.pendingAttachments):
-			return
-		item = state.pendingAttachments.remove(index)
-		self.updatePendingInput()
-		if len(state.pendingAttachments):
-			self.attachmentsList.SetSelection(min(index, len(state.pendingAttachments) - 1))
-			target = self.attachmentsList
-		else:
-			target = self.attachButton
-		# Translators: Announced after removing an attachment. {name} is the file name.
-		self._announceAfterFocus(target, _("Removed {name}").format(name=item.name))
+	def announceStillAttached(self):
+		"""When the dialog opens or comes back to the front: files still waiting for the next question."""
+		count = len(state.pendingAttachments)
+		if count:
+			# Translators: Announced when the dialog opens with files still attached. {count} is a number.
+			message = ngettext("Still attached: {count} file", "Still attached: {count} files", count).format(count=count)
+			announceWhenFocused(self.questionCtrl, message)
 
 	# Search in the Conversation box
 
@@ -1525,7 +1968,7 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			return
 		wrapped = False
 		if fromCaret or self._matchStart is None:
-			index = search.nearestMatch(matches, 0, forward=True) if fromCaret else (0 if forward else len(matches) - 1)
+			index = 0 if forward else len(matches) - 1
 		elif forward:
 			later = [i for i, start in enumerate(matches) if start > self._matchStart]
 			index, wrapped = (later[0], False) if later else (0, True)
@@ -1544,12 +1987,28 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		if wrapped:
 			# Translators: Announced when the search goes past the last (or first) match and starts again.
 			parts.append(_("Wrapped to first match.") if forward else _("Wrapped to last match."))
-		# Translators: Announced for a search match. {number} and {count} are numbers, {line} is the matched line.
+		# Translators: Announced for a search match. {number} and {count} are numbers.
 		parts.append(_("Match {number} of {count}.").format(number=index + 1, count=len(matches)))
 		parts.append(search.lineAt(value, start))
-		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, " ".join(parts))
+		announceWhenFocused(ctrl, " ".join(parts))
 
 	# Question recall
+
+	def _caretLine(self):
+		"""(caret line, number of lines) in the Question box."""
+		ctrl = self.questionCtrl
+		try:
+			result = ctrl.PositionToXY(ctrl.GetInsertionPoint())
+			line = result[-1] if isinstance(result, tuple) else 0
+			return line, max(1, ctrl.GetNumberOfLines())
+		except Exception:
+			return 0, 1
+
+	def canRecall(self, older):
+		value = self.questionCtrl.GetValue()
+		recalled = self._recall.shown is not None and value == self._recall.shown
+		line, lines = self._caretLine()
+		return history.shouldRecall(older, line, lines, recalled, value)
 
 	def recallQuestion(self, older):
 		value = self.questionCtrl.GetValue()
@@ -1585,16 +2044,15 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			key in (wx.WXK_UP, wx.WXK_DOWN)
 			and not (control or shift or alt)
 			and self.FindFocus() == self.questionCtrl
-			and self._recall.canRecall(self.questionCtrl.GetValue())
+			and self.canRecall(older=key == wx.WXK_UP)
 		):
 			self.recallQuestion(older=key == wx.WXK_UP)
 			return
 		if key == wx.WXK_ESCAPE:
 			if self._dictation is not None:
 				self._finishDictation(dictation.REASON_ESCAPE)
-			elif state.pending is not None:
-				self.cancel(announce=True)
 			else:
+				# A running question keeps running (Alt+C cancels it); the dialog closes.
 				self.Close()
 			return
 		if key in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER) and self.FindFocus() == self.questionCtrl:
@@ -1610,7 +2068,7 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 
 	def _announceAfterFocus(self, control, message):
 		control.SetFocus()
-		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, message)
+		announceWhenFocused(control, message)
 
 	# Asking
 
@@ -1622,10 +2080,43 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 				self._finishDictation(dictation.REASON_SEND)
 			self.ask()
 
+	def _screenshotForSending(self):
+		"""(ok, screenshot or None): the screenshot is taken now, only when the box is ticked, from the window
+		that was in front when "Ask about this" was used. ok is False when the user chose not to send.
+		"""
+		context = state.pendingContext
+		if context is None or not state.includeScreenshot:
+			return True, None
+		try:
+			from . import png, screenshot
+
+			if not screenshot.windowExists(context.hwnd):
+				# Translators: Error when the window for the screenshot was closed. {window} is its title.
+				showError(_("{window} is no longer open, so no screenshot can be taken. Untick the screenshot box to send without one.").format(
+					window=context.windowName,
+				), self)
+				return False, None
+			captured = screenshot.captureWindow(context.hwnd)
+		except Exception:
+			log.error("Ask AI: screenshot failed", exc_info=True)
+			captured = None
+		if captured is None:
+			# Translators: Error when no screenshot could be taken.
+			showError(_("The screenshot could not be taken. Untick the screenshot box to send without one."), self)
+			return False, None
+		width, height, pixels = png.downscaleBgra(*captured)
+		if png.isNearlyUniform(width, height, pixels):
+			# Translators: Yes/No question when the screenshot is a single colour.
+			question = _("Screenshot looks blank, possibly because Screen Curtain is on. Send it anyway?")
+			# Translators: Title of the blank screenshot question.
+			if not askYesNo(question, _("Screenshot"), self):
+				return False, None
+		return True, (width, height, pixels)
+
 	def ask(self):
 		if state.pending is not None:
 			# Translators: Reported when the user tries to send while an answer is pending.
-			ui.message(_("Still waiting for the answer. Press Escape to cancel."))
+			ui.message(_("Still waiting for the answer. Press Alt+C to cancel it."))
 			return
 		question = self.questionCtrl.GetValue().strip()
 		if not question:
@@ -1633,8 +2124,23 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			ui.message(_("Type or dictate a question first."))
 			self.questionCtrl.SetFocus()
 			return
+		conversation = self.conversation
+		refusal = requestRefusal(conversation)
+		if refusal:
+			showError(refusal, self)
+			return
+		allowWrites = writeConsent(conversation, self)
+		ok, captured = self._screenshotForSending()
+		if not ok:
+			return
+		if state.pendingContext is not None:
+			state.pendingContext.screenshot = captured
 		longText = len(question) > attachments.LONG_QUESTION_CHARS
-		startRequest(question, self.conversation)
+		try:
+			startRequest(question, conversation, allowWrites=allowWrites)
+		except RequestRefused as e:
+			showError(e.message, self)
+			return
 		self._recall.reset()
 		self._updateTitle()
 		self._refreshConversationBox()
@@ -1648,7 +2154,7 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		ui.message(_("Asking {service}…").format(service=serviceName(self.providerId)))
 
 	def onAnswer(self, spoken, changes, doneTitle=None):
-		"""Show and speak an answer. doneTitle (the user is in another app) prefixes "Done: <title>."."""
+		"""Show and speak an answer. doneTitle (the user is in another app) prefixes "Ask AI answer, <title>:"."""
 		self._setBusy(False)
 		self._refreshConversationBox()
 		if getConf()["speakAnswers"]:
@@ -1663,8 +2169,7 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			ui.message(changes)
 
 	def onFailure(self, question, error, quiet=False):
-		"""Show a failure. quiet (the user is in another app): no dialog; the caller speaks "Failed: ...".
-		"""
+		"""Show a failure. quiet (the user is in another app): no dialog; the caller speaks "Failed: ..."."""
 		self._setBusy(False)
 		self._refreshConversationBox()
 		if not self.questionCtrl.GetValue().strip():
@@ -1746,7 +2251,7 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		if chosen is None:
 			return
 		formatKey, baseName = chosen
-		folder = conversation.projectFolder if os.path.isdir(conversation.projectFolder or "") else documentsFolder()
+		folder = existingProjectFolder(conversation) or documentsFolder()
 		title = question.strip().splitlines()[0] if question.strip() else conversation.title
 		saveDocument(
 			self,
@@ -1769,7 +2274,7 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		# The button stays enabled while busy so focus never lands on a disabled control.
 		if state.pending is not None:
 			# Translators: Reported when Dictate is pressed while waiting for an answer.
-			ui.message(_("Still waiting for the answer. Press Escape to cancel first."))
+			ui.message(_("Still waiting for the answer. Press Alt+C to cancel it first."))
 			return
 		self.questionCtrl.SetFocus()
 		self._dictateToken += 1
@@ -1892,15 +2397,15 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			self.saveDraft(silent=True)
 		except Exception:
 			log.debugWarning("Ask AI: could not save the draft", exc_info=True)
-		pending = state.pending
-		if pending is not None:
-			service = serviceName(pending.providerId)
+		# Screen text and the screenshot choice never wait for a later question; attached files do.
+		clearScreenContext()
+		if state.pending is not None:
 			if getConf()["speakAnswers"]:
-				# Translators: Announced when the dialog is closed while waiting. {service} is "ChatGPT" or "Claude".
-				ui.message(_("{service} will speak the answer when it's ready.").format(service=service))
+				# Translators: Announced when the dialog closes while a question is still running.
+				ui.message(_("Still working; the answer will be spoken when ready."))
 			else:
-				# Translators: Announced when the dialog is closed while waiting and speaking is off.
-				ui.message(_("{service} is still working. You will hear when the answer is ready.").format(service=service))
+				# Translators: Announced when the dialog closes while waiting and speaking is off.
+				ui.message(_("Still working; you will hear when the answer is ready."))
 		if state.current is not None:
 			state.save(state.current)
 		self._dictateToken += 1
@@ -1912,7 +2417,14 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 
 
 def openAskDialog():
-	"""Open the dialog, or bring the existing one to the front. Call on the main thread."""
+	"""Open the dialog, or bring the existing one to the front. Call on the main thread.
+	The first time, ask about the old Ask GPT add-on; whenever it opens or comes back, say which files are
+	still attached to the next question.
+	"""
+	try:
+		offerToRemoveOldAddon(gui.mainFrame)
+	except Exception:
+		log.error("Ask AI: could not check for the old Ask GPT add-on", exc_info=True)
 	dialog = AskAIDialog.getInstance()
 	gui.mainFrame.prePopup()
 	try:
@@ -1922,6 +2434,7 @@ def openAskDialog():
 		else:
 			dialog.Raise()
 		dialog.questionCtrl.SetFocus()
+		dialog.announceStillAttached()
 	finally:
 		gui.mainFrame.postPopup()
 
@@ -1993,6 +2506,7 @@ class AskAISettingsPanel(SettingsPanel):
 		self._loginUrl = None
 		self._loginUrlProvider = None
 		self._initialStatusPending = True
+		self._statusTimer = None
 		self._providerIds = providers.ids()
 		self._models = {}
 		for providerId in self._providerIds:
@@ -2020,16 +2534,21 @@ class AskAISettingsPanel(SettingsPanel):
 
 		self.accountCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the choice of which service's account, program and defaults are shown below.
-			_("Account settin&gs for:"),
+			_("Show settin&gs for service:"),
 			wx.Choice,
 			choices=names,
 		)
 		self.accountCtrl.SetSelection(self._providerIds.index(shown))
 		self.accountCtrl.Bind(wx.EVT_CHOICE, self.onAccountChoice)
 
+		# The shown service's controls are grouped, so screen readers say "Claude account and defaults".
+		self.accountGroup = wx.StaticBoxSizer(wx.VERTICAL, self, label=self._groupLabel(shown))
+		box = self.accountGroup.GetStaticBox()
+		group = guiHelper.BoxSizerHelper(box, sizer=self.accountGroup)
+
 		# A single-line read-only TextCtrl is skipped by Tab in wx, so the status is a read-only
 		# multi-line box one line high: wx lets Tab reach read-only multi-line boxes.
-		self.statusCtrl = sHelper.addLabeledControl(
+		self.statusCtrl = group.addLabeledControl(
 			# Translators: Label of the read-only sign-in status field.
 			_("Status:"),
 			wx.TextCtrl,
@@ -2046,28 +2565,28 @@ class AskAISettingsPanel(SettingsPanel):
 		# Two rows of buttons, so each row fits NVDA's settings area.
 		signInButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
 		# Label set by _updateAccountLabels.
-		self.signInButton = signInButtons.addButton(self, label=self._signInLabel(shown))
+		self.signInButton = signInButtons.addButton(box, label=self._signInLabel(shown))
 		self.signInButton.Bind(wx.EVT_BUTTON, self.onSignIn)
 		# Translators: Button that checks the sign-in status.
-		checkButton = signInButtons.addButton(self, label=_("C&heck status"))
+		checkButton = signInButtons.addButton(box, label=_("C&heck status"))
 		checkButton.Bind(wx.EVT_BUTTON, lambda evt: self.refreshStatus(announce=True))
-		sHelper.addItem(signInButtons)
+		group.addItem(signInButtons)
 		accountButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
 		# Translators: Button that signs out of the service in its program.
-		signOutButton = accountButtons.addButton(self, label=_("Sign ou&t"))
+		signOutButton = accountButtons.addButton(box, label=_("Sign ou&t"))
 		signOutButton.Bind(wx.EVT_BUTTON, self.onSignOut)
 		# Translators: Button that copies the sign-in web address, for when the browser did not open.
-		self.copyLinkButton = accountButtons.addButton(self, label=_("Cop&y sign-in link"))
+		self.copyLinkButton = accountButtons.addButton(box, label=_("Cop&y sign-in link"))
 		self.copyLinkButton.Bind(wx.EVT_BUTTON, self.onCopyLink)
 		# Translators: Button (Claude only) to type the code the sign-in page shows after using the copied link.
-		self.enterCodeButton = accountButtons.addButton(self, label=_("Enter sign-in code..."))
+		self.enterCodeButton = accountButtons.addButton(box, label=_("Enter sign-in code..."))
 		self.enterCodeButton.Bind(wx.EVT_BUTTON, self.onEnterCode)
-		sHelper.addItem(accountButtons)
+		group.addItem(accountButtons)
 
 		# The path label sits on its own line; the field stretches next to Browse.
 		# The label is created right before the field, so Windows uses it as the field's name.
 		self.pathLabel, self.pathCtrl, browseButton = self._labelledPathRow(
-			sHelper,
+			group,
 			self._pathLabel(shown),
 			# Translators: Button to choose the program file.
 			_("&Browse..."),
@@ -2078,12 +2597,12 @@ class AskAISettingsPanel(SettingsPanel):
 		# Editable: the list comes from the service (Codex's own model list, Claude Code's aliases),
 		# and any other model name can be typed. The label sits above the box so long names do not widen the panel.
 		modelLabel = wx.StaticText(
-			self,
+			box,
 			# Translators: Label of the default model field.
 			label=_("Default &model (blank uses your plan's default):"),
 		)
 		self.modelCtrl = wx.ComboBox(
-			self,
+			box,
 			choices=[],
 			style=wx.CB_DROPDOWN,
 			size=(self.scaleSize(PATH_MIN_WIDTH), -1),
@@ -2092,15 +2611,16 @@ class AskAISettingsPanel(SettingsPanel):
 		modelBlock.Add(modelLabel)
 		modelBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
 		modelBlock.Add(self.modelCtrl, flag=wx.EXPAND)
-		sHelper.addItem(modelBlock, flag=wx.EXPAND)
+		group.addItem(modelBlock, flag=wx.EXPAND)
 
 		self._effortValues = []
-		self.effortCtrl = sHelper.addLabeledControl(
+		self.effortCtrl = group.addLabeledControl(
 			# Translators: Label of the default reasoning effort choice.
 			_("Default &reasoning effort:"),
 			wx.Choice,
 			choices=[],
 		)
+		sHelper.addItem(self.accountGroup, flag=wx.EXPAND)
 
 		# Label above the box, which then uses the full panel width without widening the panel.
 		instructionsLabel = wx.StaticText(
@@ -2140,11 +2660,10 @@ class AskAISettingsPanel(SettingsPanel):
 			wx.CheckBox(self, label=_("Allow the AI to create and edit files in the pro&ject folder")),
 		)
 		self.projectWritesCheck.SetValue(conf["allowProjectWrites"])
-		# No letter is left for this one (the panel avoids O, C and A); it is reached with Tab.
 		self.announceCheck = sHelper.addItem(
-			# Translators: Checkbox: say "Done: <conversation>" or "Failed: ..." when a question finishes while
-			# the user works in another application.
-			wx.CheckBox(self, label=_("Announce when answers finish while working in other apps")),
+			# Translators: Checkbox: say "Ask AI answer, <conversation>:" or "Failed: ..." when a question
+			# finishes while the user works in another application.
+			wx.CheckBox(self, label=_("Anno&unce when answers finish while working in other apps")),
 		)
 		self.announceCheck.SetValue(conf["announceInOtherApps"])
 
@@ -2176,17 +2695,26 @@ class AskAISettingsPanel(SettingsPanel):
 		chooseFolderButton.Bind(wx.EVT_BUTTON, self.onChooseConversationsDir)
 
 		self.autoUpdateCheck = sHelper.addItem(
-			# Translators: Checkbox to check GitHub for new Ask AI versions once a day.
+			# Translators: Checkbox to check GitHub for new Ask AI versions once a day (Tools menu checks now).
 			wx.CheckBox(self, label=_("Check for updates automatica&lly")),
 		)
 		self.autoUpdateCheck.SetValue(conf["autoUpdateCheck"])
-		updateButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
-		# Translators: Button that checks for a newer Ask AI version now.
-		updateButton = updateButtons.addButton(self, label=_("Check for &updates now"))
-		updateButton.Bind(wx.EVT_BUTTON, self.onCheckForUpdates)
-		sHelper.addItem(updateButtons)
+		self.removeOldAddonButton = None
+		self._oldAddon = findOldAddon()
+		if self._oldAddon is not None:
+			# Only while Ask GPT 1.x is still installed; no letter is left for it, so it is reached with Tab.
+			oldButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
+			# Translators: Button in the settings that removes the old Ask GPT add-on.
+			self.removeOldAddonButton = oldButtons.addButton(self, label=_("Remove old Ask GPT add-on"))
+			self.removeOldAddonButton.Bind(wx.EVT_BUTTON, self.onRemoveOldAddon)
+			sHelper.addItem(oldButtons)
 
 		self._loadAccountValues()
+
+	@staticmethod
+	def _groupLabel(providerId):
+		# Translators: Title of the group of a service's settings. {service} is "ChatGPT" or "Claude".
+		return _("{service} account and defaults").format(service=serviceName(providerId))
 
 	@staticmethod
 	def _signInLabel(providerId):
@@ -2199,11 +2727,14 @@ class AskAISettingsPanel(SettingsPanel):
 		return _("{program} e&xecutable path (blank to detect automatically):").format(program=programName(providerId))
 
 	def _labelledPathRow(self, sHelper, label, buttonLabel, value):
-		"""Label on its own line, then a stretching text field and a button. Returns (label, field, button)."""
-		labelCtrl = wx.StaticText(self, label=label)
-		field = wx.TextCtrl(self, size=(self.scaleSize(PATH_MIN_WIDTH), -1))
+		"""Label on its own line, then a stretching text field and a button. Returns (label, field, button).
+		The controls belong to the helper's window (the panel, or the account group box).
+		"""
+		parent = getattr(sHelper, "_parent", None) or self
+		labelCtrl = wx.StaticText(parent, label=label)
+		field = wx.TextCtrl(parent, size=(self.scaleSize(PATH_MIN_WIDTH), -1))
 		field.SetValue(value)
-		button = wx.Button(self, label=buttonLabel)
+		button = wx.Button(parent, label=buttonLabel)
 		row = wx.BoxSizer(wx.HORIZONTAL)
 		row.Add(field, proportion=1, flag=wx.ALIGN_CENTER_VERTICAL)
 		row.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
@@ -2244,6 +2775,7 @@ class AskAISettingsPanel(SettingsPanel):
 		values = self._values[providerId]
 		models = self._models.get(providerId, [])
 		self.pathLabel.SetLabel(self._pathLabel(providerId))
+		self.accountGroup.GetStaticBox().SetLabel(self._groupLabel(providerId))
 		self.signInButton.SetLabel(self._signInLabel(providerId))
 		self.pathCtrl.SetValue(values["path"])
 		self.modelCtrl.Set([""] + [modelCatalog.comboLabel(model) for model in models])
@@ -2279,7 +2811,13 @@ class AskAISettingsPanel(SettingsPanel):
 		if selection < 0:
 			return
 		self._showProvider(self._providerIds[selection])
-		self.refreshStatus(announce=False)
+		# Arrowing through the services checks only the one the user stays on, 400 ms after the last change,
+		# and then says it once: "Claude: Signed in with Claude".
+		self._statusGeneration += 1
+		self.statusCtrl.SetValue(_("Checking…"))
+		if self._statusTimer is not None:
+			self._statusTimer.Stop()
+		self._statusTimer = wx.CallLater(STATUS_DEBOUNCE_MS, self.refreshStatus, announce=True, withService=True)
 
 	def _updateLoginButtons(self):
 		loginRunning = _loginClient is not None and _loginClient.providerId == self._shownProvider
@@ -2288,21 +2826,27 @@ class AskAISettingsPanel(SettingsPanel):
 
 	# Status and account
 
-	def _setStatus(self, generation, text, announce):
+	def _setStatus(self, generation, text, announce, providerId=None):
 		if not self or generation != self._statusGeneration:
 			return
 		self.statusCtrl.SetValue(text)
 		initial = self._initialStatusPending
 		self._initialStatusPending = False
+		if announce and providerId:
+			# Translators: Status announced after choosing a service, e.g. "Claude: Signed in with Claude".
+			ui.message(_("{service}: {status}").format(service=serviceName(providerId), status=text))
 		# Also announce when the user is reading the Status field, so its changes are not missed.
-		if announce or self.FindFocus() == self.statusCtrl:
+		elif announce or self.FindFocus() == self.statusCtrl:
 			ui.message(text)
 		elif initial and self.IsShownOnScreen():
 			# The first result after the panel opens, while the user is still on it.
 			# Translators: Announced when the Ask AI settings open. {status} is e.g. "Signed in with ChatGPT".
 			ui.message(_("Ask AI: {status}").format(status=text))
 
-	def refreshStatus(self, announce=False):
+	def refreshStatus(self, announce=False, withService=False):
+		self._statusTimer = None
+		if not self:
+			return
 		self._statusGeneration += 1
 		generation = self._statusGeneration
 		self.statusCtrl.SetValue(_("Checking…"))
@@ -2323,7 +2867,7 @@ class AskAISettingsPanel(SettingsPanel):
 			else:
 				state.loginStates[providerId] = loginState
 				status = loginStatusText(providerId, loginState)
-			wx.CallAfter(self._setStatus, generation, status, announce)
+			wx.CallAfter(self._setStatus, generation, status, announce, providerId if withService else None)
 
 		threading.Thread(target=worker, name="askAI.status", daemon=True).start()
 
@@ -2358,7 +2902,10 @@ class AskAISettingsPanel(SettingsPanel):
 		if _loginClient is not client:
 			return  # Cancelled, superseded or shut down while the message was spoken.
 		try:
-			proc = client.login(onUrl=lambda url: wx.CallAfter(self._onLoginUrl, client, url))
+			proc = client.login(
+				onUrl=lambda url: wx.CallAfter(self._onLoginUrl, client, url),
+				onCodePrompt=lambda: wx.CallAfter(self._updateLoginButtons) if self else None,
+			)
 		except ProviderError as e:
 			cancelLogin()
 			showError(friendlyError(e), self if self else None)
@@ -2388,16 +2935,23 @@ class AskAISettingsPanel(SettingsPanel):
 		if not self._loginUrl:
 			return
 		if api.copyToClip(self._loginUrl):
-			if providers.get(self._loginUrlProvider).loginAcceptsCode:
+			client = _loginClient
+			wantsCode = (
+				providers.get(self._loginUrlProvider).loginAcceptsCode
+				and client is not None
+				and getattr(client, "loginWantsCode", False)
+			)
+			if wantsCode:
 				# Translators: Announced after copying a sign-in link that ends with a code to type back.
 				message = _(
-					"Sign-in link copied. Paste it into your browser's address bar. If the page shows a code, "
-					"copy it and press Enter sign-in code."
+					"Sign-in link copied. Paste it into your browser's address bar. When the page shows a code, "
+					"copy it and paste it into the box that opens now."
 				)
-			else:
-				# Translators: Announced after copying the sign-in link.
-				message = _("Sign-in link copied. Paste it into your browser's address bar.")
-			ui.message(message)
+				# The program asked for a code: open the box for it right away (it stays open until used).
+				speakThen(message, lambda: self.onEnterCode(None) if self else None)
+				return
+			# Translators: Announced after copying the sign-in link.
+			ui.message(_("Sign-in link copied. Paste it into your browser's address bar."))
 		else:
 			ui.message(_("Could not copy to the clipboard."))
 
@@ -2482,10 +3036,15 @@ class AskAISettingsPanel(SettingsPanel):
 			if folderDialog.ShowModal() == wx.ID_OK:
 				self.conversationsDirCtrl.SetValue(folderDialog.GetPath())
 
-	def onCheckForUpdates(self, evt):
-		from . import updateCheck
-
-		updateCheck.checkForUpdates(self)
+	def onRemoveOldAddon(self, evt):
+		# Translators: Confirmation before removing the old add-on.
+		if not askYesNo(_("Remove the old Ask GPT add-on? Restart NVDA afterwards."), _("Ask AI"), self):
+			return
+		if self._oldAddon is not None and removeOldAddon(self._oldAddon):
+			getConf()["askedToRemoveAskGPT"] = True
+			self.removeOldAddonButton.Disable()
+			# Translators: Announced after the old add-on was marked for removal.
+			ui.message(_("Ask GPT will be removed when NVDA restarts."))
 
 	# Saving
 

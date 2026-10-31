@@ -134,7 +134,7 @@ class TestStore(unittest.TestCase):
 		loaded = self.store.load(conversation.id)
 		self.assertEqual(loaded.toDict(), conversation.toDict())
 		with open(os.path.join(self.folder, conversation.id + ".json"), encoding="utf-8") as f:
-			self.assertEqual(json.load(f)["schemaVersion"], 3)
+			self.assertEqual(json.load(f)["schemaVersion"], 4)
 		self.assertIsNone(self.store.load("f" * 32))
 		self.assertIsNone(self.store.load("../../etc/passwd"))
 

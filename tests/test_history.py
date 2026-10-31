@@ -96,7 +96,7 @@ class TestDrafts(unittest.TestCase):
 		self.assertEqual(loaded.messages[0]["context"], "12 characters from Word")
 		self.assertNotIn("x", loaded.messages[0])
 		self.assertEqual(loaded.toDict()["schemaVersion"], SCHEMA_VERSION)
-		self.assertEqual(SCHEMA_VERSION, 3)
+		self.assertEqual(SCHEMA_VERSION, 4)
 		self.assertEqual(loaded.questions, ["Q"])
 
 	def test_olderSchemasLoadWithoutDraft(self):
@@ -106,7 +106,7 @@ class TestDrafts(unittest.TestCase):
 			self.assertEqual(loaded.draft, "")
 			self.assertNotIn("attachments", loaded.messages[0])
 		with self.assertRaises(ValueError):
-			Conversation.fromDict({"schemaVersion": 4, "id": "a" * 32})
+			Conversation.fromDict({"schemaVersion": 5, "id": "a" * 32})
 
 
 if __name__ == "__main__":

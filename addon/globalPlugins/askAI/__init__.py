@@ -46,6 +46,11 @@ confspec = {
 	# Say "Done: <title>." / "Failed: <title>. <reason>" when a question finishes while another app is in front.
 	"announceInOtherApps": "boolean(default=True)",
 	"autoUpdateCheck": "boolean(default=True)",
+	# A version the user chose to skip in the update dialog.
+	"skippedUpdateVersion": 'string(default="")',
+	# Project folders where the user allowed the AI to create and change files (normalised paths).
+	# Kept here, not in conversation files, which may be imported or synced.
+	"projectGrants": "string_list(default=list())",
 	"lastUpdateCheck": "float(default=0.0)",
 	# Set once the Ask GPT 1.x settings and conversations were copied (or there were none).
 	"migratedFromAskGPT": "boolean(default=False)",
@@ -68,8 +73,6 @@ MIGRATION_DEFAULTS = {
 	"dictationSilenceTimeout": int(dictation.DEFAULT_SILENCE_TIMEOUT),
 	"timeout": providerBase.DEFAULT_TIMEOUT,
 }
-# Delay before asking about the old add-on, so NVDA's own startup speech and dialogs come first.
-OLD_ADDON_PROMPT_DELAY_MS = 8000
 
 # Translators: Category of the Ask AI commands in the Input Gestures dialog.
 SCRIPT_CATEGORY = _("Ask AI")
@@ -104,50 +107,8 @@ def migrateFromAskGPT():
 
 
 def offerToRemoveOldAddon():
-	"""Main thread. If Ask GPT 1.x is still installed and enabled, it would also take NVDA+Alt+G:
-	ask once whether to remove it. The question is never repeated after either answer.
-	"""
-	if globalVars.appArgs.secure:
-		return
-	conf = dialogs.getConf()
-	if conf["askedToRemoveAskGPT"]:
-		return
-	try:
-		oldAddon = migration.findOldAddon(addonHandler.getAvailableAddons())
-	except Exception:
-		log.debugWarning("Ask AI: could not list add-ons", exc_info=True)
-		return
-	if oldAddon is None:
-		return
-	conf["askedToRemoveAskGPT"] = True
-	gui.mainFrame.prePopup()
-	try:
-		remove = dialogs.askYesNo(
-			# Translators: Asked once when the old Ask GPT add-on is still installed next to Ask AI.
-			_("The old Ask GPT add-on is still installed. Remove it now? (Restart NVDA afterwards.)"),
-			# Translators: Title of the question about removing the old add-on.
-			_("Ask AI"),
-			gui.mainFrame,
-		)
-	finally:
-		gui.mainFrame.postPopup()
-	if not remove:
-		return
-	try:
-		# Addon.requestRemove() (NVDA 2024.1 to 2026.x) marks it for removal at the next restart.
-		oldAddon.requestRemove()
-	except Exception:
-		log.error("Ask AI: could not remove the Ask GPT add-on", exc_info=True)
-		# Translators: Error when the old add-on could not be marked for removal.
-		dialogs.showError(_("Ask GPT could not be removed. Remove it in NVDA menu, Tools, Add-on Store, Installed add-ons."))
-		return
-	try:
-		from gui import addonGui
-
-		wx.CallAfter(addonGui.promptUserForRestart)
-	except Exception:
-		# Translators: Announced after the old add-on was marked for removal.
-		ui.message(_("Ask GPT will be removed when NVDA restarts."))
+	"""Kept for compatibility: the question is now asked when Ask AI is first opened (dialogs)."""
+	dialogs.offerToRemoveOldAddon()
 
 
 def captureScreenContext():
@@ -161,6 +122,12 @@ def captureScreenContext():
 
 	focus = api.getFocusObject()
 	navigator = api.getNavigatorObject()
+
+	foreground = None
+	try:
+		foreground = api.getForegroundObject()
+	except Exception:
+		pass
 
 	def selection(obj):
 		return obj.makeTextInfo(textInfos.POSITION_SELECTION).text
@@ -183,19 +150,29 @@ def captureScreenContext():
 	except Exception:
 		appName = ""
 	windowTitle = ""
+	hwnd = 0
 	try:
-		windowTitle = api.getForegroundObject().name or ""
+		windowTitle = foreground.name or ""
+		hwnd = foreground.windowHandle or 0
 	except Exception:
-		windowTitle = ""
-	captured = context.captureContext(focus, navigator, selection, allText, appName, windowTitle, protected)
+		pass
+	roleName = ""
 	try:
-		from . import screenshot
-
-		captured.screenshot = screenshot.captureWindow()
+		roleName = navigator.role.displayString
 	except Exception:
-		log.debugWarning("Ask AI: could not capture a screenshot", exc_info=True)
-		captured.screenshot = None
-	return captured
+		roleName = ""
+	# No screenshot now: it is taken when the question is sent, and only if the user ticks the box.
+	return context.captureContext(
+		focus,
+		navigator,
+		selection,
+		allText,
+		appName,
+		windowTitle,
+		protected,
+		roleName=roleName,
+		hwnd=hwnd,
+	)
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
@@ -247,25 +224,15 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			updateCheck.scheduleAutomaticCheck()
 		except Exception:
 			log.debugWarning("Ask AI: could not schedule the update check", exc_info=True)
-		try:
-			self._oldAddonTimer = wx.CallLater(OLD_ADDON_PROMPT_DELAY_MS, self._offerToRemoveOldAddon)
-		except Exception:
-			log.debugWarning("Ask AI: could not schedule the old add-on check", exc_info=True)
 
 	@staticmethod
 	def _cleanWorkDir():
 		try:
 			providerBase.cleanStaleAnswerFiles(dialogs.workDir)
-			attachments.RequestFiles.cleanStale(dialogs.workDir)
+			# Every request folder left from an earlier session (nothing can be running yet).
+			attachments.RequestFiles.cleanStale(dialogs.workDir, maxAge=0)
 		except Exception:
 			log.debugWarning("Ask AI: could not clean the working folder", exc_info=True)
-
-	def _offerToRemoveOldAddon(self):
-		self._oldAddonTimer = None
-		try:
-			offerToRemoveOldAddon()
-		except Exception:
-			log.error("Ask AI: could not check for the old Ask GPT add-on", exc_info=True)
 
 	def onToolsMenu(self, evt):
 		wx.CallAfter(dialogs.openAskDialog)

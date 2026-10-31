@@ -181,9 +181,16 @@ def fence(text):
 	return "`" * max(3, longest + 1)
 
 
+def safeLabel(text, limit=200):
+	"""A label that cannot break out of its line or a fence: no backticks or line breaks, limited length."""
+	text = re.sub(r"[`\r\n\t\x00-\x1f]+", " ", text or "")
+	text = re.sub(r" {2,}", " ", text).strip()
+	return text[:limit]
+
+
 def fencedBlock(label, text):
 	marker = fence(text)
-	return "%s:\n%s\n%s\n%s" % (label, marker, (text or "").rstrip("\n"), marker)
+	return "%s:\n%s\n%s\n%s" % (safeLabel(label, 300), marker, (text or "").rstrip("\n"), marker)
 
 
 DATA_NOTE = (
@@ -249,7 +256,7 @@ class RequestPlan:
 		if self.context is not None:
 			blocks.append(fencedBlock(self.context.label(), self.context.text))
 		for item in self.textItems:
-			blocks.append(fencedBlock("Attached file %s" % item.name, item.text))
+			blocks.append(fencedBlock("Attached file %s" % safeLabel(item.name), item.text))
 		notes = []
 		images = self.imageNames
 		if images and imagesAttachedDirectly:

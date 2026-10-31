@@ -20,12 +20,12 @@ for path in files:
 byId = {d.get("id"): d for d in data}
 current = [d for d in data if d.get("id") != MIGRATED_ID]
 ok = len(current) >= minimum and all(
-	d.get("schemaVersion") == 3 and d.get("id", "") + ".json" == os.path.basename(path) and d.get("provider") in ("codex", "claude")
+	d.get("schemaVersion") == 4 and d.get("id", "") + ".json" == os.path.basename(path) and d.get("provider") in ("codex", "claude")
 	for d, path in zip(data, files)
 	if d.get("id") != MIGRATED_ID
 )
 print(
-	"SHELL %s conversations saved as JSON (schema 3, with provider) after exit | %d files: %s"
+	"SHELL %s conversations saved as JSON (schema 4, with provider) after exit | %d files: %s"
 	% ("PASS" if ok else "FAIL", len(files), [(d.get("title"), d.get("provider"), len(d.get("messages", []))) for d in data]),
 )
 claudeAnswers = [

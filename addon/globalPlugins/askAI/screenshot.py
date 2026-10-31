@@ -7,6 +7,7 @@
 
 import ctypes
 
+PW_RENDERFULLCONTENT = 0x00000002
 SRCCOPY = 0x00CC0020
 CAPTUREBLT = 0x40000000
 BI_RGB = 0
@@ -60,6 +61,10 @@ def _load():
 		gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
 		user32.GetForegroundWindow.argtypes = ()
 		user32.GetForegroundWindow.restype = wintypes.HWND
+		user32.IsWindow.argtypes = (wintypes.HWND,)
+		user32.IsWindow.restype = wintypes.BOOL
+		user32.PrintWindow.argtypes = (wintypes.HWND, wintypes.HDC, wintypes.UINT)
+		user32.PrintWindow.restype = wintypes.BOOL
 		user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(RECT))
 		user32.GetWindowRect.restype = wintypes.BOOL
 		user32.GetDC.argtypes = (wintypes.HWND,)
@@ -102,14 +107,22 @@ def _load():
 	return _dlls
 
 
+def windowExists(hwnd, dlls=None):
+	if not hwnd:
+		return False
+	user32, _gdi32 = dlls or _load()
+	return bool(user32.IsWindow(hwnd))
+
+
 def captureWindow(hwnd=None, dlls=None):
-	"""(width, height, BGRA bytes with top-down rows) of the window as it appears on screen
-	(copied from the screen, so it is what the user's window shows), or None on failure.
+	"""(width, height, BGRA bytes with top-down rows) of the window, or None on failure.
+	PrintWindow(PW_RENDERFULLCONTENT) asks the window to draw itself, so other windows covering it (such as
+	the Ask AI dialog) are not in the picture; if that fails the window's area is copied from the screen.
 	"""
 	user32, gdi32 = dlls or _load()
 	if not hwnd:
 		hwnd = user32.GetForegroundWindow()
-	if not hwnd:
+	if not hwnd or not user32.IsWindow(hwnd):
 		return None
 	rect = RECT()
 	if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -127,8 +140,9 @@ def captureWindow(hwnd=None, dlls=None):
 		if not memoryDc or not bitmap:
 			return None
 		old = gdi32.SelectObject(memoryDc, bitmap)
-		if not gdi32.BitBlt(memoryDc, 0, 0, width, height, screenDc, rect.left, rect.top, SRCCOPY | CAPTUREBLT):
-			return None
+		if not user32.PrintWindow(hwnd, memoryDc, PW_RENDERFULLCONTENT):
+			if not gdi32.BitBlt(memoryDc, 0, 0, width, height, screenDc, rect.left, rect.top, SRCCOPY | CAPTUREBLT):
+				return None
 		info = BITMAPINFO()
 		info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
 		info.bmiHeader.biWidth = width

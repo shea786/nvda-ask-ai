@@ -35,9 +35,9 @@ PROJECT_INSTRUCTIONS = (
 	"the user the exact file name. Do not modify or delete existing files unless the user asks."
 )
 PROJECT_READ_ONLY_INSTRUCTIONS = (
-	"The current working directory is the user's project folder. You may read the files in it, but you "
-	"cannot create or change files there. If the user asks for a file, give the content in your answer; "
-	"they can save it with Save answer as."
+	"The current working directory is the user's project folder, but you have no tools to open or change "
+	"files in it. If the user asks about its files, ask them to paste or attach the text. If the user asks "
+	"for a file, give the content in your answer; they can save it with Save answer as."
 )
 
 INSTALL_HELP = (
@@ -48,8 +48,9 @@ INSTALL_HELP = (
 
 # codex-cli 0.160.0 accepts these instead of the ChatGPT sign-in ("Run codex login or provide an API key
 # through a supported auth env var"); CODEX_API_KEY in particular overrides the sign-in for `codex exec`.
-# Removing them keeps usage on the user's ChatGPT plan instead of per-use API billing.
-STRIPPED_ENVIRONMENT = ("OPENAI_API_KEY", "CODEX_API_KEY")
+# Removing them keeps usage on the user's ChatGPT plan instead of per-use API billing. OPENAI_BASE_URL and
+# the other OPENAI_* settings could send requests to another host, so the whole prefix is removed.
+STRIPPED_ENVIRONMENT = ("OPENAI_*", "CODEX_API_KEY")
 
 _USAGE_LIMIT_PATTERNS = patterns(
 	r"\busage limit\b",
@@ -86,6 +87,22 @@ _NETWORK_PATTERNS = patterns(
 	r"\bhandshake\b",
 	r"\btimed out\b",
 )
+
+# Always passed (verified with codex-cli 0.160.0 `codex exec --help` and `codex features list`):
+# --ignore-user-config  "Do not load $CODEX_HOME/config.toml; auth still uses CODEX_HOME"
+# --ignore-rules        "Do not load user or project execpolicy .rules files"
+# --ephemeral           "Run without persisting session files to disk"
+# --disable <FEATURE>   "Equivalent to -c features.<name>=false" for features that reach outside the request
+#                       (connectors/apps, plugins, browser and computer use, sub-agents, image generation, hooks).
+# -c web_search=disabled  turns off the web_search tool (an enum: Codex refuses to start on an unknown value).
+DISABLED_FEATURES = ("apps", "plugins", "browser_use", "computer_use", "multi_agent", "image_generation", "hooks")
+HARDENING_ARGS = ["--ignore-user-config", "--ignore-rules", "--ephemeral"]
+for _feature in DISABLED_FEATURES:
+	HARDENING_ARGS += ["--disable", _feature]
+HARDENING_ARGS += ["-c", "web_search=disabled"]
+# Without a writable project folder Codex gets no shell. ("unified_exec" is accepted by 0.160.0 but still
+# listed as enabled by `codex features list`; shell_tool is reported disabled.)
+NO_SHELL_ARGS = ["--disable", "shell_tool", "--disable", "unified_exec"]
 
 # Structure of `codex exec` stderr: a header between "--------" lines, then sections that start
 # with a marker line ("user", "thinking", "codex", "exec", "tokens used") followed by content.
@@ -163,6 +180,10 @@ def buildExecArgs(
 		"-c",
 		"approval_policy=never",
 	]
+	args += HARDENING_ARGS
+	if sandbox != "workspace-write":
+		# No shell at all unless the user allowed writing in a project folder (Codex's sandbox then applies).
+		args += NO_SHELL_ARGS
 	if projectFolder:
 		args += ["-C", base.projectFolderArgument(projectFolder, isWindows)]
 	if sandbox == "workspace-write":
@@ -299,6 +320,8 @@ class CodexProvider(base.CliProvider):
 	loginAcceptsCode = False
 	defaultEfforts = REASONING_EFFORTS
 	imagesAttachedDirectly = True
+	# Without a shell Codex cannot open other files, so only text (in the prompt) and images are accepted.
+	readsOtherFiles = False
 
 	@classmethod
 	def candidatePaths(cls, env=None, isWindows=base.IS_WINDOWS):

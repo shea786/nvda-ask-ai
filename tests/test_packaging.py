@@ -98,7 +98,7 @@ class TestUserDocs(unittest.TestCase):
 			"Enter sign-in code",
 			"no operating-system sandbox on Windows",
 			"Save answer as",
-			"Check for updates now",
+			"Check for Ask AI updates",
 			"Add-on Store",
 			"GNU General Public License version 2",
 			"%LOCALAPPDATA%\\askAI\\conversations",
@@ -110,7 +110,18 @@ class TestUserDocs(unittest.TestCase):
 			"Shift+F3",
 			"Ctrl+S",
 			"Can't use protected or password fields",
-			"Include a screenshot of the window",
+			"<strong>Include a screenshot of</strong>",
+			# Round 7: tab order, options, what is attached, security and privacy, signing, full status list.
+			"<h2>What is attached, and when it is cleared</h2>",
+			"<h2>Security and privacy</h2>",
+			"Conversation options",
+			"Still attached: 2 files",
+			"--ignore-user-config",
+			"safe mode",
+			"valid signature",
+			"Not signed in to Claude.",
+			"Screenshot looks blank, possibly because Screen Curtain is on",
+			"Allow the AI to create and change files in",
 			"Long text attached as a file",
 			"history.json",
 		):
@@ -139,7 +150,7 @@ class TestUserDocs(unittest.TestCase):
 		with open(os.path.join(ROOT, ".github", "workflows", "release.yml"), encoding="utf-8") as f:
 			release = f.read()
 		for required in ('"v*"', "contents: write", "python-version: \"3.11\"", "unittest discover", "build.py",
-				"SHA256SUMS.txt", "TESTING.txt", "--prerelease", "GITHUB_TOKEN", "actions/checkout@v4", "actions/setup-python@v5"):
+				"SHA256SUMS.txt", "TESTING.txt", "--prerelease", "GITHUB_TOKEN", "actions/checkout@11d5960a", "actions/setup-python@a26af69b", "persist-credentials: false", "environment: release", "SHA256SUMS.txt.sig"):
 			self.assertIn(required, release)
 		self.assertTrue(os.path.isfile(os.path.join(ROOT, ".github", "workflows", "ci.yml")))
 
