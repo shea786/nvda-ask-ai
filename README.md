@@ -15,7 +15,10 @@ Full user documentation: [addon/doc/en/readme.html](addon/doc/en/readme.html). N
 4. Press **NVDA+Alt+G**, type a question and press Enter. To dictate with Windows voice typing (Win+H), press Alt+D, then Enter to send.
 5. **NVDA+Alt+Shift+G** repeats the last answer. Press it twice to open the answer in a reviewable window.
 
-Supports NVDA 2024.1 to 2026.x, including 64-bit NVDA 2026.1 on Python 3.13. The add-on contains no ctypes code.
+Supports NVDA 2024.1 to 2026.x, including 64-bit NVDA 2026.1 on Python 3.13. The only ctypes code is the Windows
+Job Object support in `codexClient.py` (kernel32 `CreateJobObjectW`, `SetInformationJobObject`, `AssignProcessToJobObject`,
+`TerminateJobObject`, `CloseHandle`). It uses a private `WinDLL` with full `argtypes`/`restype` (handles are `HANDLE`, i.e. `c_void_p`)
+and pointer-sized structure fields, and is loaded only on Windows.
 
 ## Layout
 

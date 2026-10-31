@@ -253,6 +253,47 @@ class TestProcessControl(TempDirTestCase):
 		thread.join(5)
 		self.assertFalse(thread.is_alive())
 		self.assertEqual(len(errors), 1)
+		# Fix round 3, item 3: a kill by terminate() is a cancellation, not "Codex could not answer (exit code 1)".
+		self.assertEqual(errors[0].kind, codexClient.KIND_CANCELLED)
+
+	def test_terminateDuringPosixRunIsCancelled(self):
+		popen = FakePopen(hang=True)
+		client = makeClient(popen, self.workDir)
+		errors = []
+		thread = threading.Thread(target=lambda: errors.append(self._askError(client)))
+		thread.start()
+		for _ in range(100):
+			if popen.processes:
+				break
+			time.sleep(0.01)
+		client.terminate()
+		thread.join(5)
+		self.assertEqual(errors[0].kind, codexClient.KIND_CANCELLED)
+
+	@staticmethod
+	def _askError(client, cancelEvent=None):
+		try:
+			client.ask("hi", cancelEvent)
+		except CodexError as e:
+			return e
+		return None
+
+	def test_cancelSetWhileProcessExitsIsCancelled(self):
+		# The process exits with code 1 (killed) and the loop sees the exit before the cancel flag.
+		popen = FakePopen(returncode=1, stderr=b"ERROR: interrupted")
+		cancelEvent = threading.Event()
+		cancelEvent.set()
+		error = self._askError(makeClient(popen, self.workDir), cancelEvent)
+		self.assertEqual(error.kind, codexClient.KIND_CANCELLED)
+
+	def test_ordinaryFailureIsNotReportedAsCancelled(self):
+		popen = FakePopen(returncode=1, stderr=b"ERROR: interrupted")
+		error = self._askError(makeClient(popen, self.workDir), threading.Event())
+		self.assertEqual(error.kind, codexClient.KIND_OTHER)
+		# terminate() with nothing running must not mark the next run as killed.
+		client = makeClient(FakePopen(returncode=1, stderr=b"ERROR: interrupted"), self.workDir)
+		client.terminate()
+		self.assertEqual(self._askError(client).kind, codexClient.KIND_OTHER)
 
 	def test_windowsKillUsesAbsoluteTaskkill(self):
 		proc = helpers.FakeProcess(["x"], hang=True)
@@ -394,6 +435,35 @@ class TestJobObjectDeclarations(unittest.TestCase):
 		with self.assertRaises(OSError):
 			codexClient.WindowsJob(kernel32)
 		kernel32.CloseHandle.assert_called_once_with(99)
+
+	def test_kernel32PrototypesUseHandles(self):
+		# Re-confirmed for 64-bit NVDA 2026.x: every handle argument and return value is HANDLE (c_void_p),
+		# never a 32-bit int, and the structure goes by pointer.
+		from ctypes import wintypes
+
+		fakeDll = mock.MagicMock()
+		with mock.patch.object(ctypes, "WinDLL", create=True, return_value=fakeDll) as winDll, mock.patch.object(
+			codexClient,
+			"_kernel32",
+			None,
+		):
+			kernel32 = codexClient._loadKernel32()
+		winDll.assert_called_once_with("kernel32", use_last_error=True)
+		self.assertIs(kernel32, fakeDll)
+		HANDLE = wintypes.HANDLE
+		self.assertIs(HANDLE, ctypes.c_void_p)
+		extPointer = ctypes.POINTER(codexClient.JOBOBJECT_EXTENDED_LIMIT_INFORMATION)
+		expected = {
+			"CreateJobObjectW": ((ctypes.c_void_p, wintypes.LPCWSTR), HANDLE),
+			"SetInformationJobObject": ((HANDLE, ctypes.c_int, extPointer, wintypes.DWORD), wintypes.BOOL),
+			"AssignProcessToJobObject": ((HANDLE, HANDLE), wintypes.BOOL),
+			"TerminateJobObject": ((HANDLE, wintypes.UINT), wintypes.BOOL),
+			"CloseHandle": ((HANDLE,), wintypes.BOOL),
+		}
+		for name, (argtypes, restype) in expected.items():
+			function = getattr(fakeDll, name)
+			self.assertEqual(tuple(function.argtypes), argtypes, name)
+			self.assertIs(function.restype, restype, name)
 
 	def test_moduleImportsWithoutWindowsDlls(self):
 		# Loading kernel32 is deferred, so importing on Linux works and the default job factory is lazy.

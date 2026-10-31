@@ -740,6 +740,7 @@ class CodexClient:
 		self._lock = threading.Lock()
 		self._process = None
 		self._job = None
+		self._killedProcess = None  # The run process that terminate() killed.
 		self._loginProcess = None
 		self._loginJob = None
 		self.loginUrl = None
@@ -864,8 +865,14 @@ class CodexClient:
 			with self._lock:
 				if self._process is proc:
 					self._process, self._job = None, None
+				killedByTerminate = self._killedProcess is proc
+				if killedByTerminate:
+					self._killedProcess = None
 			if job is not None:
 				job.close()  # Kill-on-close also ends any process that outlived codex.
+		if failure is None and (killedByTerminate or (cancelEvent is not None and cancelEvent.is_set())):
+			# Killed by terminate() (NVDA exiting) or cancelled while it was exiting: its exit code means nothing.
+			failure = CodexError(KIND_CANCELLED, "The request was cancelled.")
 		if failure is not None:
 			raise failure
 		return proc.returncode, _decode(output["stdout"]), _decode(output["stderr"])
@@ -972,6 +979,7 @@ class CodexClient:
 		"""Kill the running request and any login, synchronously. Used when NVDA exits or the add-on unloads."""
 		with self._lock:
 			proc, job = self._process, self._job
+			self._killedProcess = proc
 		if proc is not None:
 			self._kill(proc, job)
 		self.cancelLogin()

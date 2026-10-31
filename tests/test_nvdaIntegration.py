@@ -394,6 +394,179 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 		self.assertEqual(calls, [1])
 
 
+class TestAskYesNo(unittest.TestCase):
+	"""Fix round 3, item 5: Yes and No only, Escape means No; gui.messageBox on NVDA 2024.x."""
+
+	def setUp(self):
+		self.fake, _spoken = buildFakeNvda(os.path.join(helpers.ROOT, "tmp-config"))
+		self.saved = {name: sys.modules.get(name) for name in list(self.fake) + ["gui.message"]}
+		sys.modules.update(self.fake)
+		sys.path.insert(0, os.path.join(helpers.ROOT, "addon", "globalPlugins"))
+		for name in list(sys.modules):
+			if name == "askGPT" or name.startswith("askGPT."):
+				del sys.modules[name]
+		self.dialogs = importlib.import_module("askGPT.dialogs")
+
+	def tearDown(self):
+		for name in list(sys.modules):
+			if name == "askGPT" or name.startswith("askGPT."):
+				del sys.modules[name]
+		sys.path.remove(os.path.join(helpers.ROOT, "addon", "globalPlugins"))
+		for name, module in self.saved.items():
+			if module is None:
+				sys.modules.pop(name, None)
+			else:
+				sys.modules[name] = module
+
+	def _installMessageModule(self, result):
+		created = []
+
+		class ReturnCode:
+			YES, NO, CANCEL = 1, 2, 3
+
+		class DefaultButtonSet:
+			YES_NO = ("yes", "no")
+			YES_NO_CANCEL = ("yes", "no", "cancel")
+
+		class MessageDialog:
+			def __init__(self, parent, message, title, dialogType=None, *, buttons=None):
+				self.args = (parent, message, title)
+				self.buttons = buttons
+				self.escapeId = None
+				created.append(self)
+
+			def SetEscapeId(self, id):
+				self.escapeId = id
+				return self
+
+			def ShowModal(self):
+				# Escape returns the escape id.
+				return self.escapeId if result == "escape" else getattr(ReturnCode, result)
+
+			@classmethod
+			def ask(cls, *args, **kwargs):
+				raise AssertionError("ask() adds a Cancel button")
+
+		sys.modules["gui.message"] = _module(
+			"gui.message",
+			MessageDialog=MessageDialog,
+			ReturnCode=ReturnCode,
+			DefaultButtonSet=DefaultButtonSet,
+		)
+		return created, ReturnCode
+
+	def test_yesNoOnly(self):
+		created, ReturnCode = self._installMessageModule("YES")
+		self.assertTrue(self.dialogs.askYesNo("Sign out?", "Ask GPT", None))
+		dialog = created[-1]
+		self.assertEqual(dialog.buttons, ("yes", "no"))
+		self.assertEqual(dialog.args, (None, "Sign out?", "Ask GPT"))
+		self.assertEqual(dialog.escapeId, ReturnCode.NO)
+
+	def test_noAndEscapeMeanNo(self):
+		self._installMessageModule("NO")
+		self.assertFalse(self.dialogs.askYesNo("q", "t"))
+		self._installMessageModule("escape")
+		self.assertFalse(self.dialogs.askYesNo("q", "t"))
+
+	def test_fallbackForNvda2024(self):
+		sys.modules["gui.message"] = None  # Makes "from gui.message import ..." raise ImportError.
+		calls = []
+		wx = self.fake["wx"]
+		wx.YES, wx.YES_NO, wx.ICON_QUESTION = 2, 10, 256
+		self.fake["gui"].messageBox = lambda *args: calls.append(args) or 2
+		self.assertTrue(self.dialogs.askYesNo("q", "t", "parent"))
+		self.assertEqual(calls, [("q", "t", 10 | 256, "parent")])
+
+
+class TestSettingsStatus(TestPluginWithFakeNvda):
+	"""Fix round 3, item 1: the first status result is announced while the panel is shown."""
+
+	def _fakePanel(self, focused=False, shown=True):
+		panel = mock.MagicMock()
+		panel.__bool__.return_value = True
+		panel._statusGeneration = 3
+		panel._initialStatusPending = True
+		panel.FindFocus.return_value = panel.statusCtrl if focused else object()
+		panel.IsShownOnScreen.return_value = shown
+		return panel
+
+	def setStatus(self, panel, text, announce=False, generation=3):
+		self.dialogs.AskGPTSettingsPanel._setStatus(panel, generation, text, announce)
+
+	def test_firstResultAnnouncedOnce(self):
+		panel = self._fakePanel()
+		self.setStatus(panel, "Signed in with ChatGPT")
+		panel.statusCtrl.SetValue.assert_called_with("Signed in with ChatGPT")
+		self.assertEqual(self.spoken, ["Ask GPT: Signed in with ChatGPT"])
+		self.setStatus(panel, "Not signed in")
+		self.assertEqual(self.spoken, ["Ask GPT: Signed in with ChatGPT"], "later silent refreshes stay silent")
+
+	def test_notAnnouncedWhenPanelHidden(self):
+		panel = self._fakePanel(shown=False)
+		self.setStatus(panel, "Signed in with ChatGPT")
+		self.assertEqual(self.spoken, [])
+		self.assertFalse(panel._initialStatusPending)
+
+	def test_focusedOrRequestedAnnouncesPlainText(self):
+		panel = self._fakePanel(focused=True)
+		self.setStatus(panel, "Not signed in")
+		self.assertEqual(self.spoken, ["Not signed in"])
+		panel = self._fakePanel()
+		self.setStatus(panel, "Signed out", announce=True)
+		self.assertEqual(self.spoken[-1], "Signed out")
+
+	def test_staleResultIgnored(self):
+		panel = self._fakePanel()
+		self.setStatus(panel, "old", generation=2)
+		panel.statusCtrl.SetValue.assert_not_called()
+		self.assertEqual(self.spoken, [])
+
+
+class TestSettingsLayoutSource(unittest.TestCase):
+	"""Fix round 3, items 1 and 2: checks on the panel code (the real layout needs wx on Windows)."""
+
+	def setUp(self):
+		with open(os.path.join(helpers.PACKAGE_DIR, "dialogs.py"), encoding="utf-8") as f:
+			source = f.read()
+		start = source.index("class AskGPTSettingsPanel(")
+		self.panel = source[start:source.index("\ndef shortStatusForError")]
+		self.source = source
+
+	def test_statusIsTabbableAndFirst(self):
+		self.assertIn("STATUS_STYLE = wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_NO_VSCROLL", self.source)
+		makeSettings = self.panel[self.panel.index("def makeSettings"):]
+		self.assertIn("style=STATUS_STYLE", makeSettings)
+		firstControl = re.search(r"(addLabeledControl|wx\.TextCtrl\(|addButton\(|wx\.Button\(|wx\.CheckBox\()", makeSettings)
+		self.assertEqual(firstControl.group(1), "addLabeledControl")
+		self.assertLess(makeSettings.index("self.statusCtrl ="), makeSettings.index("addButton("))
+
+	def test_widthsFitTheSettingsArea(self):
+		import ast
+
+		constants = {}
+		for node in ast.parse(self.source).body:
+			if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, int):
+				constants[node.targets[0].id] = node.value.value
+		self.assertLessEqual(constants["PANEL_CONTENT_WIDTH"], 544)
+		# Each row: its fixed-width control plus room for a label or a button stays inside about 540 pixels.
+		self.assertLessEqual(constants["STATUS_WIDTH"] + 80, 540)
+		self.assertLessEqual(constants["PATH_MIN_WIDTH"] + 120, 540)
+		self.assertLessEqual(constants["INSTRUCTIONS_MIN_WIDTH"], 540)
+		# No literal pixel widths in the panel, and the long path label is not beside the field.
+		self.assertIsNone(re.search(r"size=\(\d{3}", self.panel))
+		self.assertNotIn("orientation=wx.HORIZONTAL", self.panel)
+		self.assertIn("pathBlock.Add(pathLabel)", self.panel)
+		labels = [
+			label
+			for label in re.findall(r'_\(\s*"((?:[^"\\]|\\.)*)"\s*\)', self.panel)
+			if "&" in label or label.endswith(":")
+		]
+		self.assertGreaterEqual(len(labels), 10)
+		for label in labels:
+			self.assertLessEqual(len(label), 70, label)
+
+
 def _mnemonics(source, className):
 	"""Letters after "&" in the translatable labels of one class in dialogs.py."""
 	start = source.index("class %s(" % className)

@@ -35,6 +35,14 @@ BEEP_INTERVAL_MS = 2000
 LOGIN_TIMEOUT_SECONDS = 180
 # Delay before announcing after moving focus, so the focus announcement does not swallow it.
 ANNOUNCE_AFTER_FOCUS_MS = 100
+# Settings panel layout (unscaled pixels). NVDA's settings area is about 566 pixels wide, and
+# NVDA's own panels wrap descriptions at 544, so no row may need more than that.
+PANEL_CONTENT_WIDTH = 544
+STATUS_WIDTH = 360
+PATH_MIN_WIDTH = 200
+INSTRUCTIONS_MIN_WIDTH = 300
+# Read-only multi-line, so that Tab reaches it (see AskGPTSettingsPanel.makeSettings).
+STATUS_STYLE = wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_NO_VSCROLL
 
 
 def _once(func):
@@ -198,11 +206,15 @@ def showError(message, parent=None):
 
 
 def askYesNo(message, title, parent=None):
+	"""Yes/No question; Escape answers No. Call on the main thread."""
 	try:
-		from gui.message import MessageDialog, ReturnCode  # NVDA 2025.1 and later.
+		from gui.message import DefaultButtonSet, MessageDialog, ReturnCode  # NVDA 2025.1 and later.
 	except ImportError:
 		return gui.messageBox(message, title, wx.YES_NO | wx.ICON_QUESTION, parent) == wx.YES
-	return MessageDialog.ask(message, title, parent) == ReturnCode.YES
+	# MessageDialog.ask() would add a Cancel button; build the dialog with Yes and No only.
+	dialog = MessageDialog(parent, message, title, buttons=DefaultButtonSet.YES_NO)
+	dialog.SetEscapeId(ReturnCode.NO)
+	return dialog.ShowModal() == ReturnCode.YES
 
 
 def speakThen(message, callback):
@@ -710,27 +722,38 @@ class AskGPTSettingsPanel(SettingsPanel):
 		conf = getConf()
 		self._statusGeneration = 0
 		self._loginUrl = None
+		self._initialStatusPending = True
 		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
 		description = sHelper.addItem(wx.StaticText(self, label=self.panelDescription))
-		description.Wrap(self.scaleSize(544))
+		description.Wrap(self.scaleSize(PANEL_CONTENT_WIDTH))
 
+		# A single-line read-only TextCtrl is skipped by Tab in wx, so the status is a read-only
+		# multi-line box one line high: wx lets Tab reach read-only multi-line boxes.
+		# It is the first control that takes focus in the panel.
 		self.statusCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the read-only sign-in status field.
 			_("Status:"),
 			wx.TextCtrl,
-			style=wx.TE_READONLY,
-			size=(400, -1),
+			style=STATUS_STYLE,
+			size=(self.scaleSize(STATUS_WIDTH), -1),
+		)
+		# One line high: sets both the minimum and the current size, so the sizer keeps it.
+		self.statusCtrl.SetInitialSize(
+			(self.scaleSize(STATUS_WIDTH), int(self.statusCtrl.GetCharHeight() * 1.6)),
 		)
 		# Translators: Status shown before the check finishes.
 		self.statusCtrl.SetValue(_("Checking…"))
 
-		accountButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
+		# Two rows of two buttons, so the row fits NVDA's settings area.
+		signInButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
 		# Translators: Button that starts ChatGPT sign-in in the browser.
-		signInButton = accountButtons.addButton(self, label=_("&Sign in with ChatGPT..."))
+		signInButton = signInButtons.addButton(self, label=_("&Sign in with ChatGPT..."))
 		signInButton.Bind(wx.EVT_BUTTON, self.onSignIn)
 		# Translators: Button that checks the sign-in status.
-		checkButton = accountButtons.addButton(self, label=_("C&heck status"))
+		checkButton = signInButtons.addButton(self, label=_("C&heck status"))
 		checkButton.Bind(wx.EVT_BUTTON, lambda evt: self.refreshStatus(announce=True))
+		sHelper.addItem(signInButtons)
+		accountButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
 		# Translators: Button that signs out of ChatGPT in Codex.
 		signOutButton = accountButtons.addButton(self, label=_("Sign o&ut"))
 		signOutButton.Bind(wx.EVT_BUTTON, self.onSignOut)
@@ -740,22 +763,31 @@ class AskGPTSettingsPanel(SettingsPanel):
 		self.copyLinkButton.Disable()
 		sHelper.addItem(accountButtons)
 
-		pathHelper = guiHelper.BoxSizerHelper(self, orientation=wx.HORIZONTAL)
-		self.pathCtrl = pathHelper.addLabeledControl(
+		# The path label sits on its own line; the field stretches next to Browse.
+		# The label is created right before the field, so Windows uses it as the field's name.
+		pathLabel = wx.StaticText(
+			self,
 			# Translators: Label of the Codex program path field.
-			_("Codex e&xecutable path (leave blank to detect automatically):"),
-			wx.TextCtrl,
-			size=(300, -1),
+			label=_("Codex e&xecutable path (leave blank to detect automatically):"),
 		)
+		self.pathCtrl = wx.TextCtrl(self, size=(self.scaleSize(PATH_MIN_WIDTH), -1))
 		self.pathCtrl.SetValue(conf["codexPath"])
 		# Translators: Button to choose the Codex program file.
-		browseButton = pathHelper.addItem(wx.Button(self, label=_("&Browse...")))
+		browseButton = wx.Button(self, label=_("&Browse..."))
 		browseButton.Bind(wx.EVT_BUTTON, self.onBrowse)
-		sHelper.addItem(pathHelper)
+		pathRow = wx.BoxSizer(wx.HORIZONTAL)
+		pathRow.Add(self.pathCtrl, proportion=1, flag=wx.ALIGN_CENTER_VERTICAL)
+		pathRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+		pathRow.Add(browseButton, flag=wx.ALIGN_CENTER_VERTICAL)
+		pathBlock = wx.BoxSizer(wx.VERTICAL)
+		pathBlock.Add(pathLabel)
+		pathBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		pathBlock.Add(pathRow, flag=wx.EXPAND)
+		sHelper.addItem(pathBlock, flag=wx.EXPAND)
 
 		self.modelCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the model field.
-			_("&Model (leave blank to use your ChatGPT plan's default):"),
+			_("&Model (blank uses your plan's default):"),
 			wx.ComboBox,
 			choices=["", "gpt-5", "gpt-5-codex"],
 			style=wx.CB_DROPDOWN,
@@ -782,14 +814,23 @@ class AskGPTSettingsPanel(SettingsPanel):
 			self._effortValues.index(effort) if effort in self._effortValues else 0,
 		)
 
-		self.instructionsCtrl = sHelper.addLabeledControl(
+		# Label above the box, which then uses the full panel width without widening the panel.
+		instructionsLabel = wx.StaticText(
+			self,
 			# Translators: Label of the instructions (system prompt) field.
-			_("&Instructions for GPT:"),
-			wx.TextCtrl,
+			label=_("&Instructions for GPT:"),
+		)
+		self.instructionsCtrl = wx.TextCtrl(
+			self,
 			style=wx.TE_MULTILINE,
-			size=(400, 100),
+			size=self.scaleSize((INSTRUCTIONS_MIN_WIDTH, 100)),
 		)
 		self.instructionsCtrl.SetValue(conf["instructions"])
+		instructionsBlock = wx.BoxSizer(wx.VERTICAL)
+		instructionsBlock.Add(instructionsLabel)
+		instructionsBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		instructionsBlock.Add(self.instructionsCtrl, flag=wx.EXPAND)
+		sHelper.addItem(instructionsBlock, flag=wx.EXPAND)
 
 		self.speakCheck = sHelper.addItem(
 			# Translators: Checkbox to speak answers automatically.
@@ -832,9 +873,15 @@ class AskGPTSettingsPanel(SettingsPanel):
 		if not self or generation != self._statusGeneration:
 			return
 		self.statusCtrl.SetValue(text)
+		initial = self._initialStatusPending
+		self._initialStatusPending = False
 		# Also announce when the user is reading the Status field, so its changes are not missed.
 		if announce or self.FindFocus() == self.statusCtrl:
 			ui.message(text)
+		elif initial and self.IsShownOnScreen():
+			# The first result after the panel opens, while the user is still on it.
+			# Translators: Announced when the Ask GPT settings open. {status} is e.g. "Signed in with ChatGPT".
+			ui.message(_("Ask GPT: {status}").format(status=text))
 
 	def refreshStatus(self, announce=False):
 		self._statusGeneration += 1
