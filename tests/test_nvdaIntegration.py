@@ -8,7 +8,10 @@ import importlib
 import inspect
 import os
 import re
+import shutil
 import sys
+import tempfile
+import threading
 import time
 import types
 import unittest
@@ -40,6 +43,7 @@ def _initTranslation():
 	caller = inspect.currentframe().f_back
 	try:
 		caller.f_globals["_"] = lambda text: text
+		caller.f_globals["ngettext"] = lambda singular, plural, count: singular if count == 1 else plural
 	finally:
 		del caller
 
@@ -105,6 +109,10 @@ def buildFakeNvda(configPath):
 		mainFrame=types.SimpleNamespace(sysTrayIcon=sysTrayIcon),
 		guiHelper=_module("gui.guiHelper"),
 		nvdaControls=_module("gui.nvdaControls"),
+		dpiScalingHelper=_module(
+			"gui.dpiScalingHelper",
+			DpiScalingHelperMixinWithoutInit=type("DpiScalingHelperMixinWithoutInit", (), {}),
+		),
 		settingsDialogs=settingsDialogs,
 		messageBox=lambda *a, **k: None,
 	)
@@ -122,6 +130,7 @@ def buildFakeNvda(configPath):
 		"gui": gui,
 		"gui.guiHelper": gui.guiHelper,
 		"gui.nvdaControls": gui.nvdaControls,
+		"gui.dpiScalingHelper": gui.dpiScalingHelper,
 		"gui.settingsDialogs": settingsDialogs,
 		"scriptHandler": _module("scriptHandler", script=_script, getLastScriptRepeatCount=lambda: 0),
 		"tones": _module("tones", beep=lambda *a, **k: None),
@@ -134,7 +143,36 @@ def buildFakeNvda(configPath):
 	}, spoken
 
 
-class TestPluginWithFakeNvda(unittest.TestCase):
+class FakeClient:
+	"""Stands in for CodexClient inside the request lifecycle (no Codex, no ChatGPT usage)."""
+
+	def __init__(self, answer="Fine.", error=None, release=None, onAsk=None):
+		self.answer = answer
+		self.error = error
+		self.release = release
+		self.onAsk = onAsk
+		self.prompts = []
+		self.terminated = False
+
+	def ask(self, prompt, cancelEvent=None):
+		self.prompts.append(prompt)
+		if self.release is not None:
+			self.release.wait(5)
+		if cancelEvent is not None and cancelEvent.is_set():
+			raise sys.modules["askGPT.codexClient"].CodexError("cancelled", "The request was cancelled.")
+		if self.onAsk is not None:
+			self.onAsk()
+		if self.error is not None:
+			raise self.error
+		return self.answer
+
+	def terminate(self):
+		self.terminated = True
+
+
+class FakeNvdaTestCase(unittest.TestCase):
+	"""Imports the add-on against stand-ins for NVDA's modules, with a temporary conversations folder."""
+
 	def setUp(self):
 		self.fakeModules, self.spoken = buildFakeNvda(os.path.join(helpers.ROOT, "tmp-config"))
 		self.savedModules = {name: sys.modules.get(name) for name in self.fakeModules}
@@ -146,6 +184,9 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 		self.package = importlib.import_module("askGPT")
 		self.dialogs = importlib.import_module("askGPT.dialogs")
 		self.codexClient = sys.modules["askGPT.codexClient"]
+		self.conversations = sys.modules["askGPT.conversations"]
+		self.tempDir = tempfile.mkdtemp(prefix="askgpt-nvda-")
+		self.conversationsDir = os.path.join(self.tempDir, "conversations")
 		self.conf = {
 			"codexPath": "",
 			"model": "",
@@ -154,9 +195,14 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 			"speakAnswers": True,
 			"keepContext": True,
 			"beepWhileWaiting": True,
+			"allowProjectWrites": True,
+			"conversationsDir": self.conversationsDir,
+			"dictationSilenceTimeout": 4,
 			"timeout": 180,
 		}
 		self.fakeModules["config"].conf["askGPT"] = self.conf
+		# Never read the developer's real Codex model cache in these tests.
+		self.dialogs.state._models = []
 
 	def tearDown(self):
 		for name in list(sys.modules):
@@ -168,7 +214,34 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 				sys.modules.pop(name, None)
 			else:
 				sys.modules[name] = module
+		shutil.rmtree(self.tempDir, ignore_errors=True)
 
+	def waitUntil(self, condition, timeout=5):
+		deadline = time.monotonic() + timeout
+		while not condition():
+			if time.monotonic() > deadline:
+				self.fail("condition not reached")
+			time.sleep(0.01)
+
+	def waitForRequests(self):
+		"""Join the request worker threads (the fake wx.CallAfter runs their callbacks in them)."""
+		for thread in threading.enumerate():
+			if thread.name == "askGPT.ask":
+				thread.join(5)
+				self.assertFalse(thread.is_alive())
+
+	def useClient(self, client):
+		self.dialogs.makeClient = lambda executablePath=None, conversation=None: client
+		return client
+
+	def _conversation(self, *messages, **kwargs):
+		conversation = self.conversations.Conversation(**kwargs)
+		for role, text in messages:
+			conversation.addMessage(role, text)
+		return conversation
+
+
+class TestPluginWithFakeNvda(FakeNvdaTestCase):
 	def test_configSpec(self):
 		spec = self.fakeModules["config"].conf.spec["askGPT"]
 		self.assertEqual(
@@ -181,13 +254,20 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 				"speakAnswers",
 				"keepContext",
 				"beepWhileWaiting",
+				"allowProjectWrites",
+				"conversationsDir",
+				"dictationSilenceTimeout",
 				"timeout",
 			},
 		)
 		# A13: beeping is on by default and can be switched off.
 		self.assertEqual(spec["beepWhileWaiting"], "boolean(default=True)")
+		self.assertEqual(spec["allowProjectWrites"], "boolean(default=True)")
+		self.assertEqual(spec["conversationsDir"], 'string(default="")')
+		self.assertEqual(spec["dictationSilenceTimeout"], "integer(default=4, min=2, max=15)")
 		self.assertEqual(spec["timeout"], "integer(default=180, min=30, max=600)")
-		self.assertIn('default="low"', spec["reasoningEffort"])
+		# Free text, because models offer levels such as xhigh.
+		self.assertEqual(spec["reasoningEffort"], 'string(default="low")')
 		# A double quote inside the default would break the configobj spec.
 		self.assertNotIn('"', spec["instructions"][len('string(default="'):-2])
 
@@ -196,7 +276,10 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 		categories = gui.settingsDialogs.NVDASettingsDialog.categoryClasses
 		plugin = self.package.GlobalPlugin()
 		self.assertIn(self.dialogs.AskGPTSettingsPanel, categories)
-		self.assertEqual(len(gui.mainFrame.sysTrayIcon.toolsMenu.items), 1)
+		self.assertEqual(
+			[label for _item, label in gui.mainFrame.sysTrayIcon.toolsMenu.items],
+			["Ask &GPT...", "Ask GPT con&versations..."],
+		)
 		# C6: the working folder is not inside NVDA's configuration folder.
 		self.assertEqual(self.dialogs.workDir, self.codexClient.defaultWorkDir())
 		self.assertNotIn("tmp-config", self.dialogs.workDir)
@@ -218,19 +301,56 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 		self.assertEqual(cls.script_askGPT.category, "Ask GPT")
 		self.assertEqual(cls.script_speakLastAnswer.gestures, ["kb:NVDA+alt+shift+g"])
 		self.assertTrue(cls.script_speakLastAnswer.speakOnDemand)
+		# Feature 4: no default gesture, remappable in Input Gestures.
+		self.assertEqual(cls.script_showConversations.gestures, [])
+		self.assertEqual(cls.script_showConversations.__doc__, "Show Ask GPT conversations")
+		self.assertEqual(cls.script_showConversations.category, "Ask GPT")
 
 	def test_speakLastAnswer(self):
 		plugin = self.package.GlobalPlugin()
 		plugin.script_speakLastAnswer(None)
 		self.assertEqual(self.spoken[-1], "No answer from GPT yet.")
 		# C3: speech gets the stripped text, the browseable window the raw answer.
-		self.dialogs.state.lastAnswer = "**Paris** is the capital. Use `a_b_c`."
+		self.dialogs.state.current = self._conversation(("user", "q"), ("assistant", "**Paris** is the capital. Use `a_b_c`."))
 		plugin.script_speakLastAnswer(None)
 		self.assertEqual(self.spoken[-1], "Paris is the capital. Use a_b_c.")
 		self.fakeModules["scriptHandler"].getLastScriptRepeatCount = lambda: 1
 		plugin.script_speakLastAnswer(None)
 		self.assertEqual(self.spoken[-1], ("browseable", "**Paris** is the capital. Use `a_b_c`."))
 		plugin.terminate()
+
+	def test_speakLastAnswerAfterRestartUsesNewestSavedConversation(self):
+		store = self.conversations.ConversationStore(self.conversationsDir)
+		old = self._conversation(("user", "old"), ("assistant", "Old answer."))
+		old.updated -= 100
+		store.save(old)
+		store.save(self._conversation(("user", "new"), ("assistant", "New answer.")))
+		plugin = self.package.GlobalPlugin()
+		plugin.script_speakLastAnswer(None)
+		self.assertEqual(self.spoken[-1], "New answer.")
+		plugin.terminate()
+
+	def test_ensureCurrentAndNewConversationDefaults(self):
+		state = self.dialogs.state
+		self.conf["model"] = "gpt-6.1-sol"
+		self.conf["reasoningEffort"] = "xhigh"
+		conversation = state.ensureCurrent()
+		self.assertTrue(conversation.isEmpty)
+		self.assertEqual((conversation.model, conversation.reasoningEffort), ("gpt-6.1-sol", "xhigh"))
+		self.assertFalse(state.save(), "an empty conversation is not written")
+		self.assertEqual(os.listdir(self.tempDir), [])
+		conversation.projectFolder = self.tempDir
+		self.assertTrue(state.save(), "a conversation with a project folder is kept")
+
+	def test_saveFailureIsAnnounced(self):
+		blocker = os.path.join(self.tempDir, "file")
+		with open(blocker, "w") as f:
+			f.write("x")
+		self.conf["conversationsDir"] = blocker  # A file, not a folder.
+		state = self.dialogs.state
+		state.current = self._conversation(("user", "q"))
+		self.assertFalse(state.save())
+		self.assertIn("Could not save the conversation", self.spoken[-1])
 
 	def test_friendlyErrorsNeverSpeakTechnicalDetail(self):
 		codexClient = self.codexClient
@@ -259,14 +379,19 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 			self.dialogs.friendlyError(CodexError(codexClient.KIND_NETWORK, "", "")),
 			"Couldn't reach ChatGPT. Check your internet connection and try again.",
 		)
-		custom = CodexError(codexClient.KIND_NOT_INSTALLED, "x", "D:\\tools\\codex.exe", codexClient.REASON_CUSTOM_PATH)
-		self.assertIn("D:\\tools\\codex.exe", self.dialogs.friendlyError(custom))
-		self.assertIn("Ask GPT settings", self.dialogs.friendlyError(custom))
+		custom = CodexError(codexClient.KIND_NOT_INSTALLED, "x", "D:\\\\tools\\\\codex.exe", codexClient.REASON_CUSTOM_PATH)
+		self.assertIn("D:\\\\tools\\\\codex.exe", self.dialogs.friendlyError(custom))
 		node = CodexError(codexClient.KIND_NOT_INSTALLED, "x", "", codexClient.REASON_NODE_MISSING)
 		self.assertIn("winget install OpenJS.NodeJS.LTS", self.dialogs.friendlyError(node))
 		self.assertIn("npm install -g @openai/codex", self.dialogs.friendlyError(CodexError("notInstalled", "")))
 		empty = CodexError(codexClient.KIND_OTHER, "x", "", codexClient.REASON_EMPTY_ANSWER)
 		self.assertIn("empty answer", self.dialogs.friendlyError(empty))
+		missing = CodexError(codexClient.KIND_CONFIG, "x", "D:\\\\gone", codexClient.REASON_PROJECT_MISSING)
+		self.assertEqual(
+			self.dialogs.friendlyError(missing),
+			"The project folder no longer exists: D:\\\\gone. Choose another folder or clear it.",
+		)
+		self.assertNotIn("Technical details", self.dialogs.transcriptErrorText(missing))
 
 	def test_shortStatusIsOneSentence(self):
 		codexClient = self.codexClient
@@ -281,82 +406,167 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 			status = self.dialogs.shortStatusForError(codexClient.CodexError(kind, "a. b. c.", "detail. more."))
 			self.assertNotIn(".", status, status)
 
-	def test_conversationStateCaps(self):
-		state = self.dialogs.ConversationState()
-		for i in range(80):
-			state.addExchange("q%d" % i, "a%d" % i)
-		self.assertEqual(len(state.history), self.dialogs.MAX_STORED_MESSAGES)
-		self.assertEqual(state.history[-1], ("assistant", "a79"))
-		# C9: the Conversation transcript is capped too, and the last-answer index follows the trim.
-		limit = self.dialogs.MAX_TRANSCRIPT_ENTRIES
-		for i in range(limit - 1):
-			state.appendTranscript("You: %d" % i)
-		self.assertEqual(state.appendTranscript("GPT: answer", isAnswer=True), 0)
-		self.assertEqual(state.lastAnswerIndex, limit - 1)
-		self.assertEqual(state.appendTranscript("You: more"), 1)
-		self.assertEqual(len(state.transcript), limit)
-		self.assertEqual(state.lastAnswerIndex, limit - 2)
-		self.assertEqual(state.transcript[state.lastAnswerIndex], "GPT: answer")
-		for i in range(limit):
-			state.appendTranscript("filler")
-		self.assertIsNone(state.lastAnswerIndex)
-		state.lastAnswer = "**raw**"
-		self.assertEqual(state.lastAnswerSpoken, "raw")
-		state.clear()
-		self.assertEqual((state.history, state.transcript, state.lastAnswer, state.lastAnswerIndex), ([], [], "", None))
+	def test_transcriptEntries(self):
+		conversation = self._conversation(
+			("user", "Hi"),
+			("assistant", "**Hello**"),
+			("error", "Oops"),
+			("note", "Created: a.docx"),
+		)
+		self.assertEqual(
+			self.dialogs.transcriptEntries(conversation),
+			[("You: Hi", False), ("GPT: Hello", True), ("Error: Oops", False), ("Created: a.docx", False)],
+		)
+		# C9: the Conversation box shows at most MAX_TRANSCRIPT_ENTRIES of the newest messages.
+		for i in range(150):
+			conversation.addMessage("user", "q%d" % i)
+		entries = self.dialogs.transcriptEntries(conversation)
+		self.assertEqual(len(entries), self.dialogs.MAX_TRANSCRIPT_ENTRIES)
+		self.assertEqual(entries[-1], ("You: q149", False))
 
-	def _pending(self, question="What is up?"):
-		client = mock.Mock()
-		pending = self.dialogs.PendingRequest(client, question)
-		self.dialogs.state.pending = pending
-		return pending
+	def test_fileChangesText(self):
+		self.assertEqual(self.dialogs.fileChangesText([], []), "")
+		self.assertEqual(self.dialogs.fileChangesText(["a.docx", "b.pdf"], []), "Created: a.docx, b.pdf")
+		self.assertEqual(
+			self.dialogs.fileChangesText(["%d.txt" % i for i in range(8)], ["x.txt"]),
+			"Created: 0.txt, 1.txt, 2.txt, 3.txt, 4.txt and 3 more. Changed: x.txt",
+		)
 
-	def test_answerArrivingAfterDialogClosedIsSpoken(self):
+	def test_effortLabels(self):
+		self.assertEqual(self.dialogs.effortLabel("low"), "Low (fastest)")
+		self.assertEqual(self.dialogs.effortLabel("xhigh"), "Extra high")
+		self.assertEqual(self.dialogs.effortLabel("turbo"), "Turbo")
+
+	def test_makeClientUsesTheConversation(self):
+		catalog = sys.modules["askGPT.modelCatalog"]
+		self.dialogs.state._models = [catalog.ModelInfo("gpt-6.1-sol", "GPT 6.1 Sol", ("low", "medium", "xhigh"), "low")]
+		self.conf["allowProjectWrites"] = False
+		conversation = self._conversation(model="gpt-6.1-sol", reasoningEffort="xhigh", projectFolder=self.tempDir)
+		client = self.dialogs.makeClient(conversation=conversation)
+		self.assertEqual((client.model, client.reasoningEffort), ("gpt-6.1-sol", "xhigh"))
+		self.assertEqual(client.projectFolder, self.tempDir)
+		self.assertFalse(client.allowProjectWrites)
+		# An effort the model does not offer falls back to the model's default.
+		conversation.reasoningEffort = "ultra"
+		self.assertEqual(self.dialogs.makeClient(conversation=conversation).reasoningEffort, "low")
+
+	def test_answerIsSavedAndSpokenAfterDialogClosed(self):
 		# A7: the request outlives the dialog and its answer is spoken.
 		dialogs = self.dialogs
-		pending = self._pending()
-		dialogs._onRequestDone(pending, "**Sunny** today.", None)
+		client = self.useClient(FakeClient(answer="**Sunny** today."))
+		conversation = self._conversation()
+		dialogs.state.current = conversation
+		dialogs.startRequest("What is up?", conversation)
+		self.waitForRequests()
 		self.assertEqual(self.spoken[-1], "Sunny today.")
-		self.assertIsNone(dialogs.state.pending)
-		self.assertEqual(dialogs.state.lastAnswer, "**Sunny** today.")
-		self.assertEqual(dialogs.state.history[-2:], [("user", "What is up?"), ("assistant", "**Sunny** today.")])
-		self.assertEqual(dialogs.state.transcript[-1], "GPT: Sunny today.")
+		self.assertEqual(conversation.lastAnswer, "**Sunny** today.")
+		self.assertEqual(conversation.title, "What is up?")
+		self.assertEqual(conversation.history, [("user", "What is up?"), ("assistant", "**Sunny** today.")])
+		saved = self.conversations.ConversationStore(self.conversationsDir).load(conversation.id)
+		self.assertEqual(saved.lastAnswer, "**Sunny** today.", "saved after each completed turn")
+		self.assertIn("Question: What is up?", client.prompts[0])
 		self.conf["speakAnswers"] = False
-		pending = self._pending()
-		dialogs._onRequestDone(pending, "Hidden.", None)
+		dialogs.startRequest("Again?", conversation)
+		self.waitForRequests()
 		self.assertIn("NVDA+Alt+Shift+G", self.spoken[-1])
 
-	def test_errorAfterDialogClosedSpeaksFriendlyMessageOnly(self):
+	def test_answerGoesToTheConversationItWasAskedIn(self):
 		dialogs = self.dialogs
-		pending = self._pending()
-		error = self.codexClient.CodexError(self.codexClient.KIND_NETWORK, "x", "ERROR: stream disconnected")
-		dialogs._onRequestDone(pending, None, error)
-		self.assertEqual(self.spoken[-1], "Couldn't reach ChatGPT. Check your internet connection and try again.")
-		self.assertIn("Technical details: ERROR: stream disconnected", dialogs.state.transcript[-1])
+		release = threading.Event()
+		self.useClient(FakeClient(answer="For A.", release=release))
+		first = self._conversation()
+		dialogs.state.current = first
+		dialogs.startRequest("Question for A", first)
+		second = self._conversation(("user", "B question"), ("assistant", "B answer"))
+		dialogs.switchConversation(second)
+		release.set()
+		self.waitForRequests()
+		self.assertIs(dialogs.state.current, second)
+		self.assertEqual(second.lastAnswer, "B answer", "the displayed conversation is untouched")
+		saved = self.conversations.ConversationStore(self.conversationsDir).load(first.id)
+		self.assertEqual(saved.lastAnswer, "For A.", "the answer went into the conversation it was asked in")
+		self.assertEqual(saved.history, [("user", "Question for A"), ("assistant", "For A.")])
+		self.assertEqual(self.spoken[-1], "For A.")
 
-	def test_cancelledRequestIsIgnored(self):
+	def test_errorIsStoredAndSpokenWhenDialogClosed(self):
 		dialogs = self.dialogs
-		pending = self._pending()
+		error = self.codexClient.CodexError(self.codexClient.KIND_NETWORK, "x", "ERROR: stream disconnected")
+		self.useClient(FakeClient(error=error))
+		conversation = self._conversation()
+		dialogs.state.current = conversation
+		dialogs.startRequest("Hello?", conversation)
+		self.waitForRequests()
+		self.assertEqual(self.spoken[-1], "Couldn't reach ChatGPT. Check your internet connection and try again.")
+		self.assertEqual(conversation.messages[-1]["role"], "error")
+		self.assertIn("Technical details: ERROR: stream disconnected", conversation.messages[-1]["text"])
+		self.assertEqual(conversation.history, [], "a failed question is not sent back as context")
+
+	def test_cancelRemovesTheQuestionAndIgnoresALateAnswer(self):
+		dialogs = self.dialogs
+		release = threading.Event()
+		self.useClient(FakeClient(answer="late answer", release=release))
+		conversation = self._conversation()
+		dialogs.state.current = conversation
+		pending = dialogs.startRequest("Never mind", conversation)
+		self.assertEqual(len(conversation.messages), 1)
 		self.assertIs(dialogs.cancelRequest(), pending)
 		self.assertTrue(pending.cancelEvent.is_set())
+		self.assertEqual(conversation.messages, [])
 		count = len(self.spoken)
-		dialogs._onRequestDone(pending, "late answer", None)
+		release.set()
+		time.sleep(0.2)
 		self.assertEqual(len(self.spoken), count)
-		self.assertEqual(dialogs.state.lastAnswer, "")
+		self.assertEqual(conversation.lastAnswer, "")
 
-	def test_shutdownKillsRequestAndLoginSynchronously(self):
-		# C5: terminate() must kill the running codex and any sign-in.
+	def test_projectModeAddsInstructionsAndReportsNewFiles(self):
 		dialogs = self.dialogs
-		pending = self._pending()
+		project = os.path.join(self.tempDir, "project")
+		os.makedirs(project)
+		with open(os.path.join(project, "existing.txt"), "w") as f:
+			f.write("old")
+
+		def createFiles():
+			with open(os.path.join(project, "report.docx"), "w") as f:
+				f.write("new")
+			with open(os.path.join(project, "existing.txt"), "w") as f:
+				f.write("changed text")
+
+		client = self.useClient(FakeClient(answer="I saved report.docx.", onAsk=createFiles))
+		conversation = self._conversation(projectFolder=project)
+		dialogs.state.current = conversation
+		dialogs.startRequest("Write a report", conversation)
+		self.waitForRequests()
+		self.assertIn("The current working directory is the user's project folder.", client.prompts[0])
+		self.assertEqual(self.spoken[-2:], ["I saved report.docx.", "Created: report.docx. Changed: existing.txt"])
+		self.assertEqual(conversation.messages[-1], {"role": "note", "text": "Created: report.docx. Changed: existing.txt", "time": conversation.messages[-1]["time"]})
+		self.assertEqual(conversation.history[-1], ("assistant", "I saved report.docx."), "notes are not context")
+
+	def test_shutdownKillsRequestAndLoginAndRestoresSpeech(self):
+		# C5 and feature 1: terminate() kills Codex and never leaves NVDA muted.
+		dialogs = self.dialogs
+		dictation = sys.modules["askGPT.dictation"]
+		release = threading.Event()
+		client = self.useClient(FakeClient(release=release))
+		conversation = self._conversation()
+		dialogs.state.current = conversation
+		pending = dialogs.startRequest("Long question", conversation)
 		loginClient = mock.Mock()
 		dialogs._loginClient = loginClient
+		speech = FakeSpeech(mode="onDemand")
+		session = dictation.DictationSession(dictation.SpeechModeAdapter(speech))
+		session.start("")
+		dialogs._activeDictation = session
+		self.assertEqual(speech.mode, "off")
 		plugin = self.package.GlobalPlugin()
 		plugin.terminate()
-		pending.client.terminate.assert_called_once_with()
+		release.set()
+		self.assertTrue(client.terminated)
 		self.assertTrue(pending.cancelEvent.is_set())
 		loginClient.cancelLogin.assert_called_once_with()
 		self.assertIsNone(dialogs._loginClient)
 		self.assertIsNone(dialogs.state.pending)
+		self.assertEqual(speech.mode, "onDemand", "speech mode restored exactly")
+		self.assertIsNone(dialogs._activeDictation)
 
 	def test_finishLoginCompareAndClear(self):
 		# C8: a finished login only acts if it is still the current one.
@@ -392,6 +602,36 @@ class TestPluginWithFakeNvda(unittest.TestCase):
 		wrapped()
 		wrapped()
 		self.assertEqual(calls, [1])
+
+	def test_conversationExportBlocks(self):
+		manager = importlib.import_module("askGPT.conversationManager")
+		conversation = self._conversation(("user", "Q?"), ("assistant", "**A**"), ("note", "Created: x.pdf"))
+		self.assertEqual(
+			manager.conversationBlocks(conversation),
+			[("heading", "You"), ("text", "Q?"), ("heading", "GPT"), ("text", "A"), ("text", "Created: x.pdf")],
+		)
+		self.assertEqual(manager.conversationBlocks(conversation, raw=True)[3], ("text", "**A**"))
+
+
+class FakeSpeech:
+	"""Minimal stand-in for NVDA's speech module (speech.getState().speechMode, setSpeechMode, SpeechMode)."""
+
+	class SpeechMode:
+		off = "off"
+		beeps = "beeps"
+		talk = "talk"
+		onDemand = "onDemand"
+
+	def __init__(self, mode="talk"):
+		self.mode = mode
+		self.history = []
+
+	def getState(self):
+		return types.SimpleNamespace(speechMode=self.mode)
+
+	def setSpeechMode(self, mode):
+		self.history.append(mode)
+		self.mode = mode
 
 
 class TestAskYesNo(unittest.TestCase):
@@ -479,7 +719,7 @@ class TestAskYesNo(unittest.TestCase):
 		self.assertEqual(calls, [("q", "t", 10 | 256, "parent")])
 
 
-class TestSettingsStatus(TestPluginWithFakeNvda):
+class TestSettingsStatus(FakeNvdaTestCase):
 	"""Fix round 3, item 1: the first status result is announced while the panel is shown."""
 
 	def _fakePanel(self, focused=False, shown=True):
@@ -556,7 +796,9 @@ class TestSettingsLayoutSource(unittest.TestCase):
 		# No literal pixel widths in the panel, and the long path label is not beside the field.
 		self.assertIsNone(re.search(r"size=\(\d{3}", self.panel))
 		self.assertNotIn("orientation=wx.HORIZONTAL", self.panel)
-		self.assertIn("pathBlock.Add(pathLabel)", self.panel)
+		# Long labels sit on their own line above their field: the path, conversations folder and model.
+		self.assertEqual(self.panel.count("self._labelledPathRow(\n"), 2)
+		self.assertIn("modelBlock.Add(modelLabel)", self.panel)
 		labels = [
 			label
 			for label in re.findall(r'_\(\s*"((?:[^"\\]|\\.)*)"\s*\)', self.panel)
@@ -568,7 +810,7 @@ class TestSettingsLayoutSource(unittest.TestCase):
 
 
 def _mnemonics(source, className):
-	"""Letters after "&" in the translatable labels of one class in dialogs.py."""
+	"""Letters after "&" in the translatable labels of one class in a module's source."""
 	start = source.index("class %s(" % className)
 	nextClass = re.search(r"^(class |def )", source[start + 1:], re.MULTILINE)
 	body = source[start:start + 1 + nextClass.start()] if nextClass else source[start:]
@@ -602,7 +844,46 @@ class TestMnemonics(unittest.TestCase):
 		letters = _mnemonics(self.source, "AskGPTDialog")
 		used = [letter for letter, label in letters if label != "&Ask"]  # &Ask and &Cancel share one button.
 		self.assertEqual(len(used), len(set(used)), letters)
-		self.assertIn("&Question:", [label for letter, label in letters])
+		labels = [label for letter, label in letters]
+		self.assertEqual(labels[0], "&Question:", "the Question box comes first")
+		# Feature 5: every new control has its own letter.
+		self.assertEqual(sorted(used), sorted("qcdvosmejfxlrn"), letters)
+		for label in (
+			"&Save answer as...",
+			"&Model:",
+			"Reasoning &effort:",
+			"Pro&ject folder:",
+			"Choose project &folder...",
+			"Open folder in E&xplorer",
+			"C&lear project folder",
+			"Conve&rsations...",
+			"&New conversation",
+		):
+			self.assertIn(label, labels)
+
+	def test_settingsPanelHasTheNewSettings(self):
+		labels = [label for letter, label in _mnemonics(self.source, "AskGPTSettingsPanel")]
+		for label in (
+			"Allow GPT to create and edit files in the pro&ject folder",
+			"&Dictation silence timeout in seconds:",
+			"Conversations &folder (blank for the default):",
+			"Choos&e folder...",
+			"Default &model (blank uses your plan's default):",
+		):
+			self.assertIn(label, labels)
+		# Old hard-coded model presets are gone; the list comes from Codex's own model cache.
+		self.assertNotIn('"gpt-5-codex"', self.source)
+
+	def test_conversationManagerMnemonicsAreUnique(self):
+		with open(os.path.join(helpers.PACKAGE_DIR, "conversationManager.py"), encoding="utf-8") as f:
+			source = f.read()
+		letters = _mnemonics(source, "ConversationManagerDialog")
+		# "&Archive" and "Un&archive" are the same button with a flipped label (set in two places).
+		used = [
+			letter for label, letter in {label: letter for letter, label in letters}.items() if label != "Un&archive"
+		]
+		self.assertEqual(len(used), len(set(used)), letters)
+		self.assertEqual(sorted(used), sorted("vhcradxi"), letters)
 
 
 if __name__ == "__main__":

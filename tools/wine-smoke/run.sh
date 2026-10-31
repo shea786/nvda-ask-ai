@@ -23,11 +23,11 @@ if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
 fi
 
 # Fresh user config with both add-ons extracted, as NVDA would after installing them.
-python3 "$REPO/build.py" >/dev/null
+ADDON="$(python3 "$REPO/build.py" | sed 's/^Built //')"
 rm -rf "$CONF" "$OUT"
 mkdir -p "$CONF/addons/askGPT" "$OUT"
 python3 -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
-	"$REPO/askGPT-1.0.0.nvda-addon" "$CONF/addons/askGPT"
+	"$ADDON" "$CONF/addons/askGPT"
 cp -r "$HERE/askGPTSmoke" "$CONF/addons/askGPTSmoke"
 cat > "$CONF/nvda.ini" <<'EOF'
 schemaVersion = 18
@@ -55,9 +55,17 @@ rm -f "$C/nvda-smoke.log"
 WORKDIR="$C/users/$USER/AppData/Local/askGPT/workdir"
 mkdir -p "$WORKDIR"
 echo stale > "$WORKDIR/answer-stale.txt"
+# Fresh saved conversations, project folder and Documents\Ask GPT for the conversation and export steps.
+CONVERSATIONS="$C/users/$USER/AppData/Local/askGPT/conversations"
+rm -rf "$CONVERSATIONS" "$C/smokeproject" "$C/users/$USER/Documents/Ask GPT"
+mkdir -p "$C/smokeproject" "$C/users/$USER/Documents"
+echo "already here" > "$C/smokeproject/existing.txt"
+# A Codex model cache like the real one (%USERPROFILE%\.codex\models_cache.json), with made-up models.
+mkdir -p "$C/users/$USER/.codex"
+cp "$HERE/fakecodex/models_cache.json" "$C/users/$USER/.codex/models_cache.json"
 
 cd /tmp
-timeout 420 wine "C:\\nvda\\$NVDA_EXE" --debug-logging "--log-file=C:\\nvda-smoke.log" >"$OUT/wine-stdout.log" 2>&1 &
+timeout 660 wine "C:\\nvda\\$NVDA_EXE" --debug-logging "--log-file=C:\\nvda-smoke.log" >"$OUT/wine-stdout.log" 2>&1 &
 WINE_PID=$!
 
 # Screenshot whenever the plugin announces a new phase.
@@ -84,6 +92,8 @@ if pgrep -f 'ping.exe' >/dev/null; then echo "SHELL FAIL ping.exe from the fake 
 	else echo "SHELL PASS no fake codex child (ping.exe) left after NVDA exit"; fi
 if grep -q SLOW-FINISHED "$C/fakecodex/calls.log"; then echo "SHELL FAIL a slow fake request ran to completion"; \
 	else echo "SHELL PASS no slow fake request ran to completion"; fi
+# Conversations are saved as JSON files, one per conversation, readable after NVDA exits.
+python3 -I "$HERE/check-conversations.py" "$CONVERSATIONS" || true
 "$WINESERVER" -k 2>/dev/null || true
 wait "$WINE_PID" 2>/dev/null || true
 

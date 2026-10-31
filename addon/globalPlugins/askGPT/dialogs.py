@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: the Ask dialog, the settings panel and the request lifecycle.
+# Ask GPT NVDA add-on: the Ask dialog, the settings panel, the request lifecycle and saved conversations.
 
 import os
 import subprocess
@@ -14,10 +14,11 @@ import gui
 import tones
 import ui
 from gui import guiHelper, nvdaControls
+from gui.dpiScalingHelper import DpiScalingHelperMixinWithoutInit
 from gui.settingsDialogs import NVDASettingsDialog, SettingsPanel
 from logHandler import log
 
-from . import codexClient
+from . import codexClient, conversations, dictation, exporters, folderSnapshot, modelCatalog
 from .codexClient import CodexClient, CodexError
 from .textUtils import estimatedSpeechMs, formatTurn, stripMarkdown
 
@@ -26,11 +27,10 @@ addonHandler.initTranslation()
 CONFIG_SECTION = "askGPT"
 # Set by the global plugin (see codexClient.defaultWorkDir).
 workDir = None
-# Keep at most this many messages (questions plus answers) for context.
-MAX_STORED_MESSAGES = 100
 # Keep at most this many entries in the Conversation box.
 MAX_TRANSCRIPT_ENTRIES = 100
 BEEP_INTERVAL_MS = 2000
+DICTATION_POLL_MS = 400
 # How long to wait for the user to finish signing in in the browser.
 LOGIN_TIMEOUT_SECONDS = 180
 # Delay before announcing after moving focus, so the focus announcement does not swallow it.
@@ -41,7 +41,9 @@ PANEL_CONTENT_WIDTH = 544
 STATUS_WIDTH = 360
 PATH_MIN_WIDTH = 200
 INSTRUCTIONS_MIN_WIDTH = 300
-# Read-only multi-line, so that Tab reaches it (see AskGPTSettingsPanel.makeSettings).
+# Ask dialog layout (unscaled pixels); the dialog stays well under 800 pixels wide.
+ASK_TEXT_WIDTH = 560
+# Read-only multi-line, so that Tab reaches it (a single-line read-only box is skipped by Tab in wx).
 STATUS_STYLE = wx.TE_READONLY | wx.TE_MULTILINE | wx.TE_NO_VSCROLL
 
 
@@ -57,75 +59,199 @@ def _once(func):
 	return wrapper
 
 
-class PendingRequest:
-	"""A question being answered. Owned by the module, so it survives closing the dialog."""
+def effortLabel(effort):
+	labels = {
+		# Translators: Reasoning effort level.
+		"minimal": _("Minimal"),
+		# Translators: Reasoning effort level.
+		"low": _("Low (fastest)"),
+		# Translators: Reasoning effort level.
+		"medium": _("Medium"),
+		# Translators: Reasoning effort level.
+		"high": _("High"),
+		# Translators: Reasoning effort level.
+		"xhigh": _("Extra high"),
+		# Translators: Reasoning effort level.
+		"max": _("Maximum"),
+		# Translators: Reasoning effort level.
+		"ultra": _("Ultra (slowest)"),
+	}
+	return labels.get(effort, effort.capitalize())
 
-	def __init__(self, client, question):
+
+def defaultModelLabel():
+	# Translators: The model choice that lets Codex pick the default model of the user's ChatGPT plan.
+	return _("Default (your plan's default)")
+
+
+class PendingRequest:
+	"""A question being answered. Owned by the module, so it survives closing the dialog,
+	and tied to the conversation it was asked in.
+	"""
+
+	def __init__(self, client, question, conversationId, projectFolder=""):
 		self.client = client
 		self.question = question
+		self.conversationId = conversationId
+		self.projectFolder = projectFolder
 		self.cancelEvent = threading.Event()
 
 
-class ConversationState:
-	"""Conversation shared between dialog instances, so closing the dialog keeps the context."""
+class AppState:
+	"""The current conversation, the saved conversations and the running request."""
 
 	def __init__(self):
-		self.history = []  # (role, raw text), role is "user" or "assistant".
-		self.transcript = []  # Entries shown in the Conversation box (Markdown stripped).
-		self.lastAnswer = ""  # Raw answer text, for copying and the browseable window.
-		self.lastAnswerIndex = None  # Index in transcript of the newest answer.
+		self.current = None
 		self.pending = None
+		self._store = None
+		self._storeFolder = None
+		self._models = None
 
-	def clear(self):
-		self.history = []
-		self.transcript = []
-		self.lastAnswer = ""
-		self.lastAnswerIndex = None
+	# Conversations
+
+	def conversationsFolder(self):
+		configured = codexClient.expandUserPath(getConf()["conversationsDir"])
+		return configured or conversations.defaultConversationsDir()
+
+	@property
+	def store(self):
+		folder = self.conversationsFolder()
+		if self._store is None or self._storeFolder != folder:
+			self._store = conversations.ConversationStore(
+				folder,
+				onError=lambda message: log.debugWarning("Ask GPT: %s" % message),
+			)
+			self._storeFolder = folder
+		return self._store
+
+	def newConversation(self):
+		conf = getConf()
+		return conversations.Conversation(model=conf["model"], reasoningEffort=conf["reasoningEffort"])
+
+	def ensureCurrent(self):
+		"""The conversation to show: this session's, else the newest saved one, else a new one."""
+		if self.current is None:
+			try:
+				self.current = self.store.latest()
+			except Exception:
+				log.error("Ask GPT: could not read saved conversations", exc_info=True)
+				self.current = None
+			if self.current is None:
+				self.current = self.newConversation()
+		return self.current
+
+	def save(self, conversation=None):
+		"""Save a conversation that has content. Errors are logged and announced, never raised."""
+		conversation = conversation or self.current
+		if conversation is None or (conversation.isEmpty and not conversation.projectFolder):
+			return False
+		try:
+			self.store.save(conversation)
+			return True
+		except Exception:
+			log.error("Ask GPT: could not save the conversation", exc_info=True)
+			# Translators: Reported when a conversation could not be written to disk.
+			ui.message(_("Could not save the conversation. Check the conversations folder in the Ask GPT settings."))
+			return False
+
+	def conversationById(self, conversationId):
+		if self.current is not None and self.current.id == conversationId:
+			return self.current
+		return self.store.load(conversationId)
+
+	# Answers (raw text is kept; speech and the Conversation box use the stripped text)
+
+	@property
+	def lastAnswer(self):
+		return self.current.lastAnswer if self.current is not None else ""
 
 	@property
 	def lastAnswerSpoken(self):
-		return stripMarkdown(self.lastAnswer) or self.lastAnswer
+		raw = self.lastAnswer
+		return stripMarkdown(raw) or raw
 
-	def addExchange(self, question, answer):
-		self.history.append(("user", question))
-		self.history.append(("assistant", answer))
-		del self.history[:-MAX_STORED_MESSAGES]
+	# Models
 
-	def appendTranscript(self, text, isAnswer=False):
-		"""Add an entry, dropping the oldest beyond MAX_TRANSCRIPT_ENTRIES. Returns how many were dropped."""
-		self.transcript.append(text)
-		if isAnswer:
-			self.lastAnswerIndex = len(self.transcript) - 1
-		dropped = max(0, len(self.transcript) - MAX_TRANSCRIPT_ENTRIES)
-		if dropped:
-			del self.transcript[:dropped]
-			if self.lastAnswerIndex is not None:
-				self.lastAnswerIndex -= dropped
-				if self.lastAnswerIndex < 0:
-					self.lastAnswerIndex = None
-		return dropped
+	@property
+	def models(self):
+		if self._models is None:
+			self.reloadModels()
+		return self._models
+
+	def reloadModels(self):
+		self._models = modelCatalog.loadModels()
+		return self._models
 
 
-state = ConversationState()
+state = AppState()
 # The client running `codex login`. Only read and written on the main thread.
 _loginClient = None
 # The open settings panel, if any, so background results can refresh it.
 _activePanel = None
+# The running dictation, so shutdown can always restore speech.
+_activeDictation = None
 
 
 def getConf():
 	return config.conf[CONFIG_SECTION]
 
 
-def makeClient(executablePath=None):
+def makeClient(executablePath=None, conversation=None):
 	conf = getConf()
+	model = conf["model"]
+	effort = conf["reasoningEffort"]
+	projectFolder = ""
+	if conversation is not None:
+		model = conversation.model
+		effort = modelCatalog.pickEffort(state.models, model, conversation.reasoningEffort or effort)
+		projectFolder = conversation.projectFolder
 	return CodexClient(
 		executablePath=conf["codexPath"] if executablePath is None else executablePath,
 		workDir=workDir,
-		model=conf["model"],
-		reasoningEffort=conf["reasoningEffort"],
+		model=model,
+		reasoningEffort=effort,
 		timeout=conf["timeout"],
+		projectFolder=projectFolder,
+		allowProjectWrites=conf["allowProjectWrites"],
 	)
+
+
+def transcriptEntries(conversation):
+	"""(text, isAnswer) for the Conversation box: the newest MAX_TRANSCRIPT_ENTRIES messages."""
+	entries = []
+	for message in conversation.messages[-MAX_TRANSCRIPT_ENTRIES:] if conversation else []:
+		role, text = message.get("role"), message.get("text", "")
+		if role == conversations.ROLE_USER:
+			# Translators: Speaker name for the user's lines in the conversation.
+			entries.append((formatTurn(_("You"), text), False))
+		elif role == conversations.ROLE_ASSISTANT:
+			# Translators: Speaker name for GPT's lines in the conversation.
+			entries.append((formatTurn(_("GPT"), stripMarkdown(text) or text), True))
+		elif role == conversations.ROLE_ERROR:
+			# Translators: Prefix for error lines in the conversation.
+			entries.append((formatTurn(_("Error"), text), False))
+		else:
+			entries.append((text, False))
+	return entries
+
+
+def fileChangesText(created, changed):
+	"""One line such as "Created: a.docx, b.pdf. Changed: x.txt", or "" when nothing changed."""
+	parts = []
+	for names, template in (
+		# Translators: Lists files GPT created in the project folder. {files} is a comma-separated list.
+		(created, _("Created: {files}")),
+		# Translators: Lists files GPT changed in the project folder. {files} is a comma-separated list.
+		(changed, _("Changed: {files}")),
+	):
+		if names:
+			shown, more = folderSnapshot.summarize(names)
+			files = ", ".join(shown)
+			if more:
+				# Translators: Ends a shortened file list, e.g. "a, b, c and 4 more".
+				files = _("{files} and {count} more").format(files=files, count=more)
+			parts.append(template.format(files=files))
+	return ". ".join(parts)
 
 
 def friendlyError(error):
@@ -175,6 +301,11 @@ def friendlyError(error):
 		# Translators: Reported when the user cancels a question.
 		return _("Request cancelled.")
 	if kind == codexClient.KIND_CONFIG:
+		if reason == codexClient.REASON_PROJECT_MISSING:
+			# Translators: Error when the project folder was moved or deleted. {path} is the folder.
+			return _("The project folder no longer exists: {path}. Choose another folder or clear it.").format(
+				path=error.detail,
+			)
 		# Translators: Error about an invalid setting. {message} explains it.
 		return _("A setting is not valid: {message}").format(message=error.message)
 	if reason == codexClient.REASON_EMPTY_ANSWER:
@@ -188,7 +319,7 @@ def transcriptErrorText(error):
 	"""Friendly message, then the technical detail after a label, for the Conversation box only."""
 	text = friendlyError(error)
 	detail = getattr(error, "detail", "")
-	if detail and getattr(error, "reason", "") != codexClient.REASON_CUSTOM_PATH:
+	if detail and getattr(error, "reason", "") not in (codexClient.REASON_CUSTOM_PATH, codexClient.REASON_PROJECT_MISSING):
 		# Translators: Introduces technical error details in the conversation.
 		text += " " + _("Technical details: {detail}").format(detail=detail)
 	return text
@@ -243,70 +374,174 @@ def openSettings():
 	gui.mainFrame.popupSettingsDialog(NVDASettingsDialog, AskGPTSettingsPanel)
 
 
+def documentsFolder():
+	"""Documents\\Ask GPT, using the real (possibly redirected) Documents folder."""
+	try:
+		documents = wx.StandardPaths.Get().GetDocumentsDir()
+	except Exception:
+		documents = ""
+	if not documents:
+		documents = os.path.join(os.path.expanduser("~"), "Documents")
+	return exporters.defaultSaveFolder(documents)
+
+
+def formatChoices():
+	"""(key, label) pairs for the "save as" format chooser."""
+	labels = {
+		# Translators: A file format in the save dialog.
+		exporters.FORMAT_DOCX: _("Word document (.docx)"),
+		# Translators: A file format in the save dialog.
+		exporters.FORMAT_PDF: _("PDF document (.pdf)"),
+		# Translators: A file format in the save dialog.
+		exporters.FORMAT_TXT: _("Plain text (.txt)"),
+		# Translators: A file format in the save dialog.
+		exporters.FORMAT_HTML: _("Web page (.html)"),
+		# Translators: A file format in the save dialog.
+		exporters.FORMAT_MD: _("Markdown (.md)"),
+	}
+	return [(key, labels[key]) for key, _extension in exporters.FORMATS]
+
+
+def chooseFormatAndName(parent, suggestedName, title):
+	"""Ask for a format, then a file name. Returns (formatKey, baseName) or None if cancelled."""
+	choices = formatChoices()
+	with wx.SingleChoiceDialog(
+		parent,
+		# Translators: Prompt in the dialog that asks which file format to save.
+		_("Choose a file format:"),
+		title,
+		[label for _key, label in choices],
+	) as formatDialog:
+		if formatDialog.ShowModal() != wx.ID_OK:
+			return None
+		formatKey = choices[formatDialog.GetSelection()][0]
+	with wx.TextEntryDialog(
+		parent,
+		# Translators: Prompt for the file name when saving.
+		_("File name (without extension):"),
+		title,
+		suggestedName,
+	) as nameDialog:
+		if nameDialog.ShowModal() != wx.ID_OK:
+			return None
+		baseName = exporters.sanitizeFileName(nameDialog.GetValue(), fallback=suggestedName or exporters.DEFAULT_BASE_NAME)
+	return formatKey, baseName
+
+
+def saveDocument(parent, folder, formatKey, baseName, docTitle, blocks, markdownBlocks=None):
+	"""Write the file and announce it. Returns the path, or None after reporting an error."""
+	try:
+		path = exporters.export(folder, baseName, formatKey, docTitle, blocks, markdownBlocks)
+	except Exception as e:
+		log.error("Ask GPT: saving failed", exc_info=True)
+		# Translators: Error when a file could not be saved. {error} is the reason.
+		showError(_("The file could not be saved: {error}").format(error=e), parent)
+		return None
+	# Translators: Announced after saving a file. {name} is the file name, {folder} the folder.
+	ui.message(_("Saved {name} in {folder}").format(name=os.path.basename(path), folder=folder))
+	return path
+
+
 # Request lifecycle (main thread unless noted)
 
 
-def startRequest(question):
+def startRequest(question, conversation):
 	conf = getConf()
-	history = list(state.history) if conf["keepContext"] else []
-	prompt = codexClient.buildPrompt(question, history, conf["instructions"])
-	pending = PendingRequest(makeClient(), question)
+	history = conversation.history if conf["keepContext"] else []
+	prompt = codexClient.buildPrompt(
+		question,
+		history,
+		conf["instructions"],
+		projectFolder=bool(conversation.projectFolder),
+	)
+	conversation.addMessage(conversations.ROLE_USER, question)
+	pending = PendingRequest(makeClient(conversation=conversation), question, conversation.id, conversation.projectFolder)
 	state.pending = pending
 	threading.Thread(target=_requestWorker, args=(pending, prompt), name="askGPT.ask", daemon=True).start()
 	return pending
 
 
 def _requestWorker(pending, prompt):
-	"""Background thread."""
+	"""Background thread. Snapshots the project folder around the request to find new files."""
+	before = folderSnapshot.snapshot(pending.projectFolder) if pending.projectFolder else None
 	try:
 		answer = pending.client.ask(prompt, pending.cancelEvent)
 	except CodexError as e:
 		if e.kind != codexClient.KIND_CANCELLED:
 			log.debugWarning("Ask GPT: %s: %s | %s" % (e.kind, e.message, e.detail))
-		wx.CallAfter(_onRequestDone, pending, None, e)
+		wx.CallAfter(_onRequestDone, pending, None, e, (), ())
+		return
 	except Exception as e:
 		log.error("Ask GPT: unexpected error", exc_info=True)
 		error = CodexError(codexClient.KIND_OTHER, "Something went wrong while asking GPT.", str(e))
-		wx.CallAfter(_onRequestDone, pending, None, error)
-	else:
-		wx.CallAfter(_onRequestDone, pending, answer, None)
+		wx.CallAfter(_onRequestDone, pending, None, error, (), ())
+		return
+	created, changed = (), ()
+	if before is not None:
+		try:
+			created, changed = folderSnapshot.compare(before, folderSnapshot.snapshot(pending.projectFolder))
+		except Exception:
+			log.debugWarning("Ask GPT: could not compare the project folder", exc_info=True)
+	wx.CallAfter(_onRequestDone, pending, answer, None, created, changed)
 
 
 def cancelRequest():
-	"""Cancel the running request, if any. Returns it, or None."""
+	"""Cancel the running request, if any, and take its question back out of its conversation."""
 	pending = state.pending
 	if pending is None:
 		return None
 	state.pending = None
 	pending.cancelEvent.set()
+	conversation = state.conversationById(pending.conversationId)
+	if conversation is not None and conversation.removeLastMessage(conversations.ROLE_USER, pending.question):
+		if conversation is not state.current:
+			state.save(conversation)
 	return pending
 
 
-def _onRequestDone(pending, answer, error):
+def _onRequestDone(pending, answer, error, created, changed):
 	if pending is not state.pending:
-		return  # Cancelled, or replaced by a newer conversation.
+		return  # Cancelled.
 	state.pending = None
+	conversation = state.conversationById(pending.conversationId)
+	if conversation is None:
+		log.debugWarning("Ask GPT: the conversation of a finished request was deleted")
+		return
+	isCurrent = conversation is state.current
 	dialog = AskGPTDialog.getInstance()
 	if error is None:
-		state.addExchange(pending.question, answer)
-		state.lastAnswer = answer
-		spoken = state.lastAnswerSpoken
-		# Translators: Speaker name for GPT's lines in the conversation.
-		dropped = state.appendTranscript(formatTurn(_("GPT"), spoken), isAnswer=True)
-		if dialog is not None:
-			dialog.onAnswer(spoken, dropped)
+		conversation.addMessage(conversations.ROLE_ASSISTANT, answer)
+		changes = fileChangesText(created, changed)
+		if changes:
+			conversation.addMessage(conversations.ROLE_NOTE, changes)
+		state.save(conversation)
+		spoken = stripMarkdown(answer) or answer
+		if dialog is not None and isCurrent:
+			dialog.onAnswer(spoken, changes)
 		elif getConf()["speakAnswers"]:
 			ui.message(spoken)
+			if changes:
+				ui.message(changes)
 		else:
 			# Translators: Announced when an answer arrives after the dialog was closed and speaking is off.
 			ui.message(_("GPT's answer is ready. Press NVDA+Alt+Shift+G to hear it."))
 		return
-	# Translators: Prefix for error lines in the conversation.
-	dropped = state.appendTranscript(formatTurn(_("Error"), transcriptErrorText(error)))
-	if dialog is not None:
-		dialog.onFailure(pending.question, error, dropped)
+	conversation.addMessage(conversations.ROLE_ERROR, transcriptErrorText(error))
+	state.save(conversation)
+	if dialog is not None and isCurrent:
+		dialog.onFailure(pending.question, error)
 	else:
 		ui.message(friendlyError(error))
+
+
+def switchConversation(conversation):
+	"""Make conversation current (main thread). The running request keeps its own conversation."""
+	if state.current is not None and state.current is not conversation:
+		state.save(state.current)
+	state.current = conversation
+	dialog = AskGPTDialog.getInstance()
+	if dialog is not None:
+		dialog.loadConversation()
 
 
 def cancelLogin():
@@ -362,17 +597,37 @@ def _refreshPanel():
 		panel.refreshStatus()
 
 
+def restoreDictation():
+	"""Give NVDA its speech back if a dictation is running. Safe to call any time."""
+	global _activeDictation
+	session, _activeDictation = _activeDictation, None
+	if session is not None:
+		try:
+			session.finish(dictation.REASON_CLOSE)
+		except Exception:
+			log.error("Ask GPT: could not restore the speech mode", exc_info=True)
+
+
 def shutdown():
-	"""Kill everything synchronously. Called from GlobalPlugin.terminate()."""
-	pending = cancelRequest()
-	if pending is not None:
-		pending.client.terminate()
-	cancelLogin()
-	closeAskDialog()
+	"""Kill everything synchronously and restore speech. Called from GlobalPlugin.terminate()."""
+	try:
+		restoreDictation()
+	finally:
+		pending = state.pending
+		if pending is not None:
+			state.pending = None
+			pending.cancelEvent.set()
+			pending.client.terminate()
+		cancelLogin()
+		if state.current is not None:
+			state.save(state.current)
+		closeAskDialog()
 
 
-class AskGPTDialog(wx.Dialog):
-	"""Non-modal dialog for asking questions. Only one instance exists at a time."""
+class AskGPTDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
+	"""Non-modal dialog for asking questions. Only one instance exists at a time.
+	Mnemonics: Q A/C D V O S M E J F X L R N (Cancel shares the Ask button).
+	"""
 
 	_instance = None
 
@@ -390,8 +645,14 @@ class AskGPTDialog(wx.Dialog):
 		AskGPTDialog._instance = self
 		self._busy = False
 		self._dictateToken = 0
+		self._dictation = None
 		self._lastAnswerPos = None
+		self._shownEntries = []
+		self._modelSlugs = []
+		self._effortValues = []
 		self.beepTimer = wx.Timer(self)
+		self.dictationTimer = wx.Timer(self)
+		width = self.scaleSize(ASK_TEXT_WIDTH)
 
 		mainSizer = wx.BoxSizer(wx.VERTICAL)
 		sHelper = guiHelper.BoxSizerHelper(self, orientation=wx.VERTICAL)
@@ -401,7 +662,7 @@ class AskGPTDialog(wx.Dialog):
 			_("&Question:"),
 			wx.TextCtrl,
 			style=wx.TE_MULTILINE,
-			size=(500, 80),
+			size=(width, self.scaleSize(70)),
 		)
 
 		actionButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
@@ -419,19 +680,62 @@ class AskGPTDialog(wx.Dialog):
 			_("Con&versation:"),
 			wx.TextCtrl,
 			style=wx.TE_MULTILINE | wx.TE_READONLY,
-			size=(500, 250),
+			size=(width, self.scaleSize(220)),
 		)
-		self._fillConversation()
-		if self._lastAnswerPos is not None:
-			# Reopening lands on the beginning of the newest answer.
-			self.conversationCtrl.SetInsertionPoint(self._lastAnswerPos)
-			self.conversationCtrl.ShowPosition(self._lastAnswerPos)
+
+		answerButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
+		# Translators: Button that copies the last answer to the clipboard.
+		copyButton = answerButtons.addButton(self, label=_("C&opy last answer"))
+		copyButton.Bind(wx.EVT_BUTTON, self.onCopy)
+		# Translators: Button that saves the last answer as a Word, PDF or other file.
+		self.saveButton = answerButtons.addButton(self, label=_("&Save answer as..."))
+		self.saveButton.Bind(wx.EVT_BUTTON, self.onSaveAnswer)
+		sHelper.addItem(answerButtons)
+
+		modelRow = guiHelper.BoxSizerHelper(self, orientation=wx.HORIZONTAL)
+		self.modelChoice = modelRow.addLabeledControl(
+			# Translators: Label of the model choice for this conversation.
+			_("&Model:"),
+			wx.Choice,
+			choices=[],
+		)
+		self.modelChoice.Bind(wx.EVT_CHOICE, self.onModelChoice)
+		self.effortChoice = modelRow.addLabeledControl(
+			# Translators: Label of the reasoning effort choice for this conversation.
+			_("Reasoning &effort:"),
+			wx.Choice,
+			choices=[],
+		)
+		self.effortChoice.Bind(wx.EVT_CHOICE, self.onEffortChoice)
+		sHelper.addItem(modelRow)
+
+		self.projectCtrl = sHelper.addLabeledControl(
+			# Translators: Label of the read-only field showing this conversation's project folder.
+			_("Pro&ject folder:"),
+			wx.TextCtrl,
+			style=STATUS_STYLE,
+			size=(width - self.scaleSize(120), -1),
+		)
+		# One line high (see STATUS_STYLE).
+		self.projectCtrl.SetInitialSize((width - self.scaleSize(120), int(self.projectCtrl.GetCharHeight() * 1.6)))
+		projectButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
+		# Translators: Button to choose the project folder where GPT may read and save files.
+		chooseProjectButton = projectButtons.addButton(self, label=_("Choose project &folder..."))
+		chooseProjectButton.Bind(wx.EVT_BUTTON, self.onChooseProject)
+		self.chooseProjectButton = chooseProjectButton
+		# Translators: Button that opens the project folder in Windows Explorer.
+		self.openProjectButton = projectButtons.addButton(self, label=_("Open folder in E&xplorer"))
+		self.openProjectButton.Bind(wx.EVT_BUTTON, self.onOpenProject)
+		# Translators: Button that removes the project folder from this conversation.
+		self.clearProjectButton = projectButtons.addButton(self, label=_("C&lear project folder"))
+		self.clearProjectButton.Bind(wx.EVT_BUTTON, self.onClearProject)
+		sHelper.addItem(projectButtons)
 
 		bottomButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
-		# Translators: Button that copies the last answer to the clipboard.
-		copyButton = bottomButtons.addButton(self, label=_("C&opy last answer"))
-		copyButton.Bind(wx.EVT_BUTTON, self.onCopy)
-		# Translators: Button that clears the conversation.
+		# Translators: Button that opens the list of saved conversations.
+		conversationsButton = bottomButtons.addButton(self, label=_("Conve&rsations..."))
+		conversationsButton.Bind(wx.EVT_BUTTON, self.onConversations)
+		# Translators: Button that starts a new conversation (the current one stays saved).
 		newButton = bottomButtons.addButton(self, label=_("&New conversation"))
 		newButton.Bind(wx.EVT_BUTTON, self.onNewConversation)
 		# Translators: Button that closes the dialog.
@@ -447,16 +751,199 @@ class AskGPTDialog(wx.Dialog):
 		self.Bind(wx.EVT_CHAR_HOOK, self.onCharHook)
 		self.Bind(wx.EVT_CLOSE, self.onClose)
 		self.Bind(wx.EVT_TIMER, self.onBeepTimer, self.beepTimer)
+		self.Bind(wx.EVT_TIMER, self.onDictationTimer, self.dictationTimer)
+		state.reloadModels()
+		self.loadConversation()
 		if state.pending is not None:
 			self._setBusy(True)  # A question asked before the dialog was closed is still running.
 		self.questionCtrl.SetFocus()
+
+	# Conversation
+
+	@property
+	def conversation(self):
+		return state.ensureCurrent()
+
+	def loadConversation(self):
+		"""Show the current conversation: title, Conversation box, model, effort and project folder."""
+		conversation = self.conversation
+		self._updateTitle()
+		self._shownEntries = []
+		self._refreshConversationBox(rebuild=True)
+		if self._lastAnswerPos is not None:
+			# Opening or switching lands on the beginning of the newest answer.
+			self.conversationCtrl.SetInsertionPoint(self._lastAnswerPos)
+			self.conversationCtrl.ShowPosition(self._lastAnswerPos)
+		self._fillModelChoices()
+		self._updateProject()
+		return conversation
+
+	def _updateTitle(self):
+		title = self.conversation.title
+		# Translators: Title of the Ask GPT dialog with the conversation title, e.g. "Ask GPT - Trip to Paris".
+		self.SetTitle(_("Ask GPT - {title}").format(title=title) if title else _("Ask GPT"))
+
+	def _refreshConversationBox(self, rebuild=False):
+		"""Mirror the conversation into the box: append new entries, or rebuild when old ones changed."""
+		ctrl = self.conversationCtrl
+		entries = transcriptEntries(self.conversation)
+		hasFocus = self.FindFocus() == ctrl
+		caret = ctrl.GetInsertionPoint()
+		shown = self._shownEntries
+		rebuilt = rebuild or entries[: len(shown)] != shown
+		if rebuilt:
+			ctrl.Clear()
+			shown = []
+			self._lastAnswerPos = None
+		appendedAnswerPos = None
+		for text, isAnswer in entries[len(shown):]:
+			if ctrl.GetLastPosition() > 0:
+				ctrl.AppendText("\n\n")
+			if isAnswer:
+				# Measured after appending the separator, so it is right however the control counts line breaks.
+				appendedAnswerPos = ctrl.GetLastPosition()
+			ctrl.AppendText(text)
+		if appendedAnswerPos is not None:
+			self._lastAnswerPos = appendedAnswerPos
+		self._shownEntries = list(entries)
+		if hasFocus:
+			# Never move a caret the user is using; after a rebuild keep it near where it was.
+			if rebuilt:
+				ctrl.SetInsertionPoint(min(caret, ctrl.GetLastPosition()))
+			return
+		if appendedAnswerPos is not None and not rebuilt:
+			# Moving to the conversation then lands on the newest answer.
+			ctrl.SetInsertionPoint(appendedAnswerPos)
+			ctrl.ShowPosition(appendedAnswerPos)
+
+	def _fillModelChoices(self):
+		conversation = self.conversation
+		conf = getConf()
+		models = modelCatalog.modelChoices(state.models, extraSlugs=[conversation.model, conf["model"]])
+		self._modelSlugs = [""] + [model.slug for model in models]
+		self.modelChoice.Set([defaultModelLabel()] + [model.displayName for model in models])
+		self.modelChoice.SetSelection(self._modelSlugs.index(conversation.model) if conversation.model in self._modelSlugs else 0)
+		self._fillEffortChoices()
+
+	def _fillEffortChoices(self):
+		conversation = self.conversation
+		efforts = modelCatalog.effortsFor(state.models, conversation.model)
+		wanted = conversation.reasoningEffort or getConf()["reasoningEffort"]
+		effort = modelCatalog.pickEffort(state.models, conversation.model, wanted)
+		self._effortValues = list(efforts)
+		self.effortChoice.Set([effortLabel(value) for value in efforts])
+		self.effortChoice.SetSelection(self._effortValues.index(effort) if effort in self._effortValues else 0)
+
+	def _modelName(self, slug):
+		model = modelCatalog.findModel(state.models, slug) if slug else None
+		if model is not None:
+			return model.displayName
+		return slug or defaultModelLabel()
+
+	def onModelChoice(self, evt):
+		selection = self.modelChoice.GetSelection()
+		if selection < 0:
+			return
+		conversation = self.conversation
+		slug = self._modelSlugs[selection]
+		if slug == conversation.model:
+			return
+		conversation.model = slug
+		conversation.reasoningEffort = modelCatalog.pickEffort(
+			state.models,
+			slug,
+			conversation.reasoningEffort or getConf()["reasoningEffort"],
+		)
+		conversation.touch()
+		self._fillEffortChoices()
+		state.save(conversation)
+		# Translators: Announced when the model changes. {model} is e.g. "GPT 6.1 Sol".
+		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, _("Model changed to {model}").format(model=self._modelName(slug)))
+
+	def onEffortChoice(self, evt):
+		selection = self.effortChoice.GetSelection()
+		if selection < 0:
+			return
+		self.conversation.reasoningEffort = self._effortValues[selection]
+		self.conversation.touch()
+		state.save(self.conversation)
+
+	def _updateProject(self):
+		folder = self.conversation.projectFolder
+		# Translators: Shown in the project folder field when no folder is set.
+		self.projectCtrl.SetValue(folder or _("None"))
+		self.openProjectButton.Enable(bool(folder))
+		self.clearProjectButton.Enable(bool(folder))
+
+	def onChooseProject(self, evt):
+		conversation = self.conversation
+		start = conversation.projectFolder if os.path.isdir(conversation.projectFolder or "") else documentsFolder()
+		with wx.DirDialog(
+			self,
+			# Translators: Title of the folder chooser for the project folder.
+			_("Choose the project folder for this conversation"),
+			defaultPath=start if os.path.isdir(start) else "",
+			style=wx.DD_DEFAULT_STYLE | wx.DD_DIR_MUST_EXIST,
+		) as folderDialog:
+			if folderDialog.ShowModal() != wx.ID_OK:
+				return
+			folder = folderDialog.GetPath()
+		conversation.projectFolder = folder
+		conversation.touch()
+		state.save(conversation)
+		self._updateProject()
+		name = os.path.basename(os.path.normpath(folder)) or folder
+		# Translators: Announced after choosing the project folder. {name} is the folder name.
+		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, _("Project folder: {name}").format(name=name))
+
+	def onOpenProject(self, evt):
+		folder = self.conversation.projectFolder
+		if not folder:
+			return
+		if not os.path.isdir(folder):
+			# Translators: Error when the project folder was moved or deleted. {path} is the folder.
+			showError(_("The project folder no longer exists: {path}. Choose another folder or clear it.").format(path=folder), self)
+			return
+		try:
+			os.startfile(folder)
+		except Exception as e:
+			log.error("Ask GPT: could not open the project folder", exc_info=True)
+			# Translators: Error when Explorer could not open the folder. {error} is the reason.
+			showError(_("Could not open the folder: {error}").format(error=e), self)
+
+	def onClearProject(self, evt):
+		conversation = self.conversation
+		conversation.projectFolder = ""
+		conversation.touch()
+		state.save(conversation)
+		self._updateProject()
+		# This button is now disabled; move focus to a control that still works.
+		# Translators: Announced after removing the project folder.
+		self._announceAfterFocus(self.chooseProjectButton, _("Project folder cleared"))
+
+	def onConversations(self, evt):
+		from .conversationManager import showConversationManager
+
+		showConversationManager(self)
+
+	def onNewConversation(self, evt):
+		if self._dictation is not None:
+			self._finishDictation(dictation.REASON_CLOSE)
+		if state.current is not None and not state.current.isEmpty:
+			state.save(state.current)
+		switchConversation(state.newConversation())
+		self.questionCtrl.Clear()
+		# Translators: Announced when a new conversation starts.
+		self._announceAfterFocus(self.questionCtrl, _("New conversation started."))
 
 	# Keyboard
 
 	def onCharHook(self, evt):
 		key = evt.GetKeyCode()
 		if key == wx.WXK_ESCAPE:
-			if state.pending is not None:
+			if self._dictation is not None:
+				self._finishDictation(dictation.REASON_ESCAPE)
+			elif state.pending is not None:
 				self.cancel(announce=True)
 			else:
 				self.Close()
@@ -465,6 +952,9 @@ class AskGPTDialog(wx.Dialog):
 			if evt.ShiftDown():
 				self.questionCtrl.WriteText("\n")
 			elif not evt.AltDown():
+				if self._dictation is not None:
+					# Speech comes back first, so "Asking GPT" is heard.
+					self._finishDictation(dictation.REASON_SEND)
 				self.ask()
 			return
 		evt.Skip()
@@ -479,6 +969,8 @@ class AskGPTDialog(wx.Dialog):
 		if state.pending is not None:
 			self.cancel(announce=True)
 		else:
+			if self._dictation is not None:
+				self._finishDictation(dictation.REASON_SEND)
 			self.ask()
 
 	def ask(self):
@@ -492,27 +984,28 @@ class AskGPTDialog(wx.Dialog):
 			ui.message(_("Type or dictate a question first."))
 			self.questionCtrl.SetFocus()
 			return
-		startRequest(question)
-		# Translators: Speaker name for the user's lines in the conversation.
-		entry = formatTurn(_("You"), question)
-		self._showEntry(entry, state.appendTranscript(entry))
+		startRequest(question, self.conversation)
+		self._updateTitle()
+		self._refreshConversationBox()
 		self.questionCtrl.Clear()
 		self._setBusy(True)
 		# Translators: Announced while waiting for an answer.
 		ui.message(_("Asking GPT…"))
 
-	def onAnswer(self, spoken, dropped):
+	def onAnswer(self, spoken, changes):
 		self._setBusy(False)
-		self._showEntry(state.transcript[-1], dropped, isAnswer=True)
+		self._refreshConversationBox()
 		if getConf()["speakAnswers"]:
 			ui.message(spoken)
 		else:
 			# Translators: Announced when an answer arrives and automatic speaking is off.
 			ui.message(_("Answer received. It is in the conversation box."))
+		if changes:
+			ui.message(changes)
 
-	def onFailure(self, question, error, dropped):
+	def onFailure(self, question, error):
 		self._setBusy(False)
-		self._showEntry(state.transcript[-1], dropped)
+		self._refreshConversationBox()
 		if not self.questionCtrl.GetValue().strip():
 			self.questionCtrl.SetValue(question)
 			self.questionCtrl.SetInsertionPointEnd()
@@ -533,6 +1026,7 @@ class AskGPTDialog(wx.Dialog):
 		if pending is None:
 			return
 		self._setBusy(False)
+		self._refreshConversationBox()
 		if not self.questionCtrl.GetValue().strip():
 			self.questionCtrl.SetValue(pending.question)
 			self.questionCtrl.SetInsertionPointEnd()
@@ -555,72 +1049,54 @@ class AskGPTDialog(wx.Dialog):
 		if self._busy:
 			tones.beep(440, 40, left=20, right=20)
 
-	# Conversation view
-
-	def _fillConversation(self):
-		"""Rebuild the Conversation box from state, remembering where the newest answer starts."""
-		ctrl = self.conversationCtrl
-		ctrl.Clear()
-		self._lastAnswerPos = None
-		for index, entry in enumerate(state.transcript):
-			if index:
-				ctrl.AppendText("\n\n")
-			if index == state.lastAnswerIndex:
-				self._lastAnswerPos = ctrl.GetLastPosition()
-			ctrl.AppendText(entry)
-
-	def _showEntry(self, text, dropped, isAnswer=False):
-		"""Mirror an entry already added to state.transcript into the Conversation box."""
-		ctrl = self.conversationCtrl
-		hasFocus = self.FindFocus() == ctrl
-		if dropped:
-			# Old entries were dropped from the start; rebuild (rare: after MAX_TRANSCRIPT_ENTRIES entries).
-			caret = ctrl.GetInsertionPoint()
-			self._fillConversation()
-			if hasFocus:
-				ctrl.SetInsertionPoint(min(caret, ctrl.GetLastPosition()))
-				return
-		else:
-			if ctrl.GetLastPosition() > 0:
-				ctrl.AppendText("\n\n")
-			start = ctrl.GetLastPosition()
-			ctrl.AppendText(text)
-			if isAnswer:
-				self._lastAnswerPos = start
-		if isAnswer and not hasFocus and self._lastAnswerPos is not None:
-			# Moving to the conversation then lands on the newest answer; never move a caret the user is using.
-			ctrl.SetInsertionPoint(self._lastAnswerPos)
-			ctrl.ShowPosition(self._lastAnswerPos)
+	# Answer actions
 
 	def onCopy(self, evt):
-		if not state.lastAnswer:
+		answer = state.lastAnswer
+		if not answer:
 			# Translators: Reported when there is no answer to copy.
 			ui.message(_("There is no answer yet."))
 			return
-		if api.copyToClip(state.lastAnswer):
+		if api.copyToClip(answer):
 			# Translators: Reported after copying the answer.
 			ui.message(_("Last answer copied to the clipboard."))
 		else:
 			# Translators: Reported when copying failed.
 			ui.message(_("Could not copy to the clipboard."))
 
-	def onNewConversation(self, evt):
-		if state.transcript or state.pending is not None:
-			# Translators: Confirmation before clearing the conversation.
-			if not askYesNo(_("Clear the current conversation and start a new one?"), _("Ask GPT"), self):
-				return
-		cancelRequest()
-		self._setBusy(False)
-		state.clear()
-		self.conversationCtrl.Clear()
-		self._lastAnswerPos = None
-		self.questionCtrl.Clear()
-		# Translators: Announced when the conversation is cleared.
-		self._announceAfterFocus(self.questionCtrl, _("New conversation started."))
+	def onSaveAnswer(self, evt):
+		conversation = self.conversation
+		index = conversation.lastAnswerIndex
+		if index is None:
+			ui.message(_("There is no answer yet."))
+			return
+		raw = conversation.messages[index]["text"]
+		question = conversation.questionFor(index)
+		# Translators: Title of the dialogs for saving an answer.
+		chosen = chooseFormatAndName(self, exporters.fileNameFromText(question), _("Save answer as"))
+		if chosen is None:
+			return
+		formatKey, baseName = chosen
+		folder = conversation.projectFolder if os.path.isdir(conversation.projectFolder or "") else documentsFolder()
+		title = question.strip().splitlines()[0] if question.strip() else conversation.title
+		saveDocument(
+			self,
+			folder,
+			formatKey,
+			baseName,
+			title,
+			[("text", stripMarkdown(raw) or raw)],
+			markdownBlocks=[("text", raw)],
+		)
 
 	# Voice input
 
 	def onDictate(self, evt):
+		if self._dictation is not None:
+			# Second press: stop voice typing (Windows+H toggles it) and give speech back.
+			self._sendVoiceTypingKey(checkFocus=False)
+			self._finishDictation(dictation.REASON_TOGGLE)
+			return
 		# The button stays enabled while busy so focus never lands on a disabled control.
 		if state.pending is not None:
 			# Translators: Reported when Dictate is pressed while waiting for an answer.
@@ -642,30 +1118,107 @@ class AskGPTDialog(wx.Dialog):
 				return
 			self._dictateToken += 1
 			# Let focus settle before opening voice typing.
-			wx.CallLater(300, self._sendVoiceTypingKey)
+			wx.CallLater(300, self._startDictation)
 
 		# Open voice typing only after the announcement, so the microphone does not hear NVDA.
 		speakThen(message, startVoiceTyping)
 
-	def _sendVoiceTypingKey(self):
+	def _focusInQuestion(self):
+		return self.IsActive() and self.FindFocus() == self.questionCtrl
+
+	def _startDictation(self):
+		"""Mute NVDA (keeping the saved mode), then press Windows+H. Speech is restored if anything fails."""
+		global _activeDictation
 		if not self:
 			return
-		if not self.IsActive() or self.FindFocus() != self.questionCtrl:
+		if not self._focusInQuestion():
 			# Translators: Reported when voice typing was not started because focus moved.
 			ui.message(_("Voice typing was not started because the focus left the question box."))
 			return
+		import speech
+
+		session = dictation.DictationSession(
+			dictation.SpeechModeAdapter(speech),
+			silenceTimeout=getConf()["dictationSilenceTimeout"],
+		)
+		try:
+			muted = session.start(self.questionCtrl.GetValue())
+		except Exception:
+			log.error("Ask GPT: could not switch speech off for dictation", exc_info=True)
+			muted = False
+		if muted:
+			self._dictation = session
+			_activeDictation = session
+		try:
+			sent = self._sendVoiceTypingKey(checkFocus=False)
+		except Exception:
+			sent = False
+		if not sent:
+			self._finishDictation(dictation.REASON_CLOSE)
+			return
+		if muted:
+			self.dictationTimer.Start(DICTATION_POLL_MS)
+
+	def onDictationTimer(self, evt):
+		session = self._dictation
+		if session is None:
+			self.dictationTimer.Stop()
+			return
+		try:
+			reason = session.poll(self.questionCtrl.GetValue(), self._focusInQuestion())
+		except Exception:
+			log.error("Ask GPT: dictation check failed", exc_info=True)
+			reason = dictation.REASON_CLOSE
+		if reason is not None:
+			self._finishDictation(reason)
+
+	def _finishDictation(self, reason):
+		"""Restore speech (exactly once) and say what was dictated, unless sending or closing."""
+		global _activeDictation
+		session, self._dictation = self._dictation, None
+		self.dictationTimer.Stop()
+		if session is None:
+			return
+		if _activeDictation is session:
+			_activeDictation = None
+		try:
+			restored = session.finish(reason)
+		except Exception:
+			log.error("Ask GPT: could not restore the speech mode", exc_info=True)
+			return
+		if not restored or reason in (dictation.REASON_SEND, dictation.REASON_CLOSE):
+			return
+		dictated = session.dictatedText(self.questionCtrl.GetValue())
+		if dictated:
+			# Translators: Announced when dictation ends. {text} is what was dictated.
+			message = _("Dictation finished. {text}").format(text=dictated)
+		else:
+			# Translators: Announced when dictation ends without any text.
+			message = _("Dictation finished, nothing was typed")
+		ui.message(message)
+
+	def _sendVoiceTypingKey(self, checkFocus=True):
+		"""Press Windows+H. Returns True if sent."""
+		if not self:
+			return False
+		if checkFocus and not self._focusInQuestion():
+			ui.message(_("Voice typing was not started because the focus left the question box."))
+			return False
 		try:
 			import keyboardHandler
 
 			keyboardHandler.KeyboardInputGesture.fromName("windows+h").send()
+			return True
 		except Exception:
 			log.error("Ask GPT: could not send Windows+H", exc_info=True)
 			# Translators: Reported when voice typing could not be started.
 			ui.message(_("Could not start Windows voice typing. Press Windows+H yourself."))
+			return False
 
 	# Closing
 
 	def onClose(self, evt):
+		self._finishDictation(dictation.REASON_CLOSE)
 		if state.pending is not None:
 			if getConf()["speakAnswers"]:
 				# Translators: Announced when the dialog is closed while waiting for an answer.
@@ -673,8 +1226,11 @@ class AskGPTDialog(wx.Dialog):
 			else:
 				# Translators: Announced when the dialog is closed while waiting and speaking is off.
 				ui.message(_("GPT is still working. You will hear when the answer is ready."))
+		if state.current is not None:
+			state.save(state.current)
 		self._dictateToken += 1
 		self.beepTimer.Stop()
+		self.dictationTimer.Stop()
 		if AskGPTDialog._instance is self:
 			AskGPTDialog._instance = None
 		self.Destroy()
@@ -701,8 +1257,24 @@ def closeAskDialog():
 		dialog.Close()
 
 
+def openConversationManager():
+	"""Open the conversation manager from anywhere (Tools menu or gesture). Main thread."""
+	from .conversationManager import showConversationManager
+
+	dialog = AskGPTDialog.getInstance()
+	if dialog is not None:
+		dialog.Raise()
+		showConversationManager(dialog)
+		return
+	gui.mainFrame.prePopup()
+	try:
+		showConversationManager(gui.mainFrame)
+	finally:
+		gui.mainFrame.postPopup()
+
+
 class AskGPTSettingsPanel(SettingsPanel):
-	# Mnemonics used here: S, H, U, Y, X, B, M, R, I, P, K, W, T.
+	# Mnemonics used here: S, H, U, Y, X, B, M, R, I, P, K, W, T, J, F, E, D.
 	# The NVDA Settings dialog itself owns O (OK), C (Cancel, Categories) and A (Apply).
 
 	# Translators: Title of the Ask GPT category in NVDA settings.
@@ -723,6 +1295,7 @@ class AskGPTSettingsPanel(SettingsPanel):
 		self._statusGeneration = 0
 		self._loginUrl = None
 		self._initialStatusPending = True
+		self._models = state.reloadModels()
 		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
 		description = sHelper.addItem(wx.StaticText(self, label=self.panelDescription))
 		description.Wrap(self.scaleSize(PANEL_CONTENT_WIDTH))
@@ -765,54 +1338,53 @@ class AskGPTSettingsPanel(SettingsPanel):
 
 		# The path label sits on its own line; the field stretches next to Browse.
 		# The label is created right before the field, so Windows uses it as the field's name.
-		pathLabel = wx.StaticText(
-			self,
+		self.pathCtrl, browseButton = self._labelledPathRow(
+			sHelper,
 			# Translators: Label of the Codex program path field.
-			label=_("Codex e&xecutable path (leave blank to detect automatically):"),
+			_("Codex e&xecutable path (leave blank to detect automatically):"),
+			# Translators: Button to choose the Codex program file.
+			_("&Browse..."),
+			conf["codexPath"],
 		)
-		self.pathCtrl = wx.TextCtrl(self, size=(self.scaleSize(PATH_MIN_WIDTH), -1))
-		self.pathCtrl.SetValue(conf["codexPath"])
-		# Translators: Button to choose the Codex program file.
-		browseButton = wx.Button(self, label=_("&Browse..."))
 		browseButton.Bind(wx.EVT_BUTTON, self.onBrowse)
-		pathRow = wx.BoxSizer(wx.HORIZONTAL)
-		pathRow.Add(self.pathCtrl, proportion=1, flag=wx.ALIGN_CENTER_VERTICAL)
-		pathRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
-		pathRow.Add(browseButton, flag=wx.ALIGN_CENTER_VERTICAL)
-		pathBlock = wx.BoxSizer(wx.VERTICAL)
-		pathBlock.Add(pathLabel)
-		pathBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
-		pathBlock.Add(pathRow, flag=wx.EXPAND)
-		sHelper.addItem(pathBlock, flag=wx.EXPAND)
 
-		self.modelCtrl = sHelper.addLabeledControl(
-			# Translators: Label of the model field.
-			_("&Model (blank uses your plan's default):"),
-			wx.ComboBox,
-			choices=["", "gpt-5", "gpt-5-codex"],
-			style=wx.CB_DROPDOWN,
+		# Editable: the list comes from Codex's own model list, and any other model name can be typed.
+		# The label sits above the box so long model names do not widen the panel.
+		self._modelLabels = [""] + [modelCatalog.comboLabel(model) for model in self._models]
+		modelLabel = wx.StaticText(
+			self,
+			# Translators: Label of the default model field.
+			label=_("Default &model (blank uses your plan's default):"),
 		)
-		self.modelCtrl.SetValue(conf["model"])
+		self.modelCtrl = wx.ComboBox(
+			self,
+			choices=self._modelLabels,
+			style=wx.CB_DROPDOWN,
+			size=(self.scaleSize(PATH_MIN_WIDTH), -1),
+		)
+		modelBlock = wx.BoxSizer(wx.VERTICAL)
+		modelBlock.Add(modelLabel)
+		modelBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		modelBlock.Add(self.modelCtrl, flag=wx.EXPAND)
+		sHelper.addItem(modelBlock, flag=wx.EXPAND)
+		configuredModel = modelCatalog.findModel(self._models, conf["model"])
+		self.modelCtrl.SetValue(modelCatalog.comboLabel(configuredModel) if configuredModel else conf["model"])
 
 		self._effortValues = list(codexClient.REASONING_EFFORTS)
-		effortLabels = [
-			# Translators: Reasoning effort choice.
-			_("Low (fastest)"),
-			# Translators: Reasoning effort choice.
-			_("Medium"),
-			# Translators: Reasoning effort choice.
-			_("High (slowest, most thorough)"),
-		]
-		self.effortCtrl = sHelper.addLabeledControl(
-			# Translators: Label of the reasoning effort choice.
-			_("&Reasoning effort:"),
-			wx.Choice,
-			choices=effortLabels,
-		)
+		for model in self._models:
+			for effort in model.efforts:
+				if effort not in self._effortValues:
+					self._effortValues.append(effort)
 		effort = conf["reasoningEffort"]
-		self.effortCtrl.SetSelection(
-			self._effortValues.index(effort) if effort in self._effortValues else 0,
+		if effort and effort not in self._effortValues:
+			self._effortValues.append(effort)
+		self.effortCtrl = sHelper.addLabeledControl(
+			# Translators: Label of the default reasoning effort choice.
+			_("Default &reasoning effort:"),
+			wx.Choice,
+			choices=[effortLabel(value) for value in self._effortValues],
 		)
+		self.effortCtrl.SetSelection(self._effortValues.index(effort) if effort in self._effortValues else 0)
 
 		# Label above the box, which then uses the full panel width without widening the panel.
 		instructionsLabel = wx.StaticText(
@@ -847,6 +1419,11 @@ class AskGPTSettingsPanel(SettingsPanel):
 			wx.CheckBox(self, label=_("Beep &while waiting for an answer")),
 		)
 		self.beepCheck.SetValue(conf["beepWhileWaiting"])
+		self.projectWritesCheck = sHelper.addItem(
+			# Translators: Checkbox that lets GPT create and edit files in a conversation's project folder.
+			wx.CheckBox(self, label=_("Allow GPT to create and edit files in the pro&ject folder")),
+		)
+		self.projectWritesCheck.SetValue(conf["allowProjectWrites"])
 
 		self.timeoutCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the timeout spin control.
@@ -856,6 +1433,41 @@ class AskGPTSettingsPanel(SettingsPanel):
 			max=codexClient.MAX_TIMEOUT,
 			initial=conf["timeout"],
 		)
+		self.dictationTimeoutCtrl = sHelper.addLabeledControl(
+			# Translators: Label of the spin control: seconds of no new dictated text before NVDA speaks again.
+			_("&Dictation silence timeout in seconds:"),
+			nvdaControls.SelectOnFocusSpinCtrl,
+			min=dictation.MIN_SILENCE_TIMEOUT,
+			max=dictation.MAX_SILENCE_TIMEOUT,
+			initial=int(conf["dictationSilenceTimeout"]),
+		)
+
+		self.conversationsDirCtrl, chooseFolderButton = self._labelledPathRow(
+			sHelper,
+			# Translators: Label of the folder where conversations are saved. Blank means the default folder.
+			_("Conversations &folder (blank for the default):"),
+			# Translators: Button to choose the conversations folder.
+			_("Choos&e folder..."),
+			conf["conversationsDir"],
+		)
+		chooseFolderButton.Bind(wx.EVT_BUTTON, self.onChooseConversationsDir)
+
+	def _labelledPathRow(self, sHelper, label, buttonLabel, value):
+		"""Label on its own line, then a stretching text field and a button."""
+		labelCtrl = wx.StaticText(self, label=label)
+		field = wx.TextCtrl(self, size=(self.scaleSize(PATH_MIN_WIDTH), -1))
+		field.SetValue(value)
+		button = wx.Button(self, label=buttonLabel)
+		row = wx.BoxSizer(wx.HORIZONTAL)
+		row.Add(field, proportion=1, flag=wx.ALIGN_CENTER_VERTICAL)
+		row.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+		row.Add(button, flag=wx.ALIGN_CENTER_VERTICAL)
+		block = wx.BoxSizer(wx.VERTICAL)
+		block.Add(labelCtrl)
+		block.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		block.Add(row, flag=wx.EXPAND)
+		sHelper.addItem(block, flag=wx.EXPAND)
+		return field, button
 
 	def _onDestroy(self, evt):
 		global _activePanel
@@ -1016,7 +1628,22 @@ class AskGPTSettingsPanel(SettingsPanel):
 				self.pathCtrl.SetValue(fileDialog.GetPath())
 				self.refreshStatus(announce=True)
 
+	def onChooseConversationsDir(self, evt):
+		current = codexClient.expandUserPath(self.conversationsDirCtrl.GetValue()) or state.conversationsFolder()
+		with wx.DirDialog(
+			self,
+			# Translators: Title of the folder chooser for saved conversations.
+			_("Choose where Ask GPT saves conversations"),
+			defaultPath=current if os.path.isdir(current) else "",
+			style=wx.DD_DEFAULT_STYLE,
+		) as folderDialog:
+			if folderDialog.ShowModal() == wx.ID_OK:
+				self.conversationsDirCtrl.SetValue(folderDialog.GetPath())
+
 	# Saving
+
+	def _modelSlug(self):
+		return modelCatalog.slugFromComboText(self.modelCtrl.GetValue(), self._models)
 
 	def isValid(self):
 		rawPath = self.pathCtrl.GetValue().strip()
@@ -1028,8 +1655,7 @@ class AskGPTSettingsPanel(SettingsPanel):
 				showError(_("The Codex executable path does not exist: {path}").format(path=path), self)
 				self.pathCtrl.SetFocus()
 				return False
-		model = self.modelCtrl.GetValue().strip()
-		if not codexClient.isValidModel(model):
+		if not codexClient.isValidModel(self._modelSlug()):
 			showError(
 				# Translators: Error when the model name has invalid characters.
 				_("The model name may only contain letters, digits, dots, dashes, colons and slashes."),
@@ -1037,12 +1663,22 @@ class AskGPTSettingsPanel(SettingsPanel):
 			)
 			self.modelCtrl.SetFocus()
 			return False
+		rawFolder = self.conversationsDirCtrl.GetValue().strip()
+		if rawFolder and rawFolder != getConf()["conversationsDir"]:
+			folder = codexClient.expandUserPath(rawFolder)
+			try:
+				os.makedirs(folder, exist_ok=True)
+			except OSError as e:
+				# Translators: Error when the conversations folder cannot be used. {error} is the reason.
+				showError(_("The conversations folder cannot be used: {error}").format(error=e), self)
+				self.conversationsDirCtrl.SetFocus()
+				return False
 		return super().isValid()
 
 	def onSave(self):
 		conf = getConf()
 		conf["codexPath"] = self.pathCtrl.GetValue().strip()
-		conf["model"] = self.modelCtrl.GetValue().strip()
+		conf["model"] = self._modelSlug()
 		selection = self.effortCtrl.GetSelection()
 		conf["reasoningEffort"] = self._effortValues[selection] if selection >= 0 else "low"
 		instructions = self.instructionsCtrl.GetValue().strip()
@@ -1050,7 +1686,10 @@ class AskGPTSettingsPanel(SettingsPanel):
 		conf["speakAnswers"] = self.speakCheck.GetValue()
 		conf["keepContext"] = self.contextCheck.GetValue()
 		conf["beepWhileWaiting"] = self.beepCheck.GetValue()
+		conf["allowProjectWrites"] = self.projectWritesCheck.GetValue()
 		conf["timeout"] = codexClient.clampTimeout(self.timeoutCtrl.GetValue())
+		conf["dictationSilenceTimeout"] = int(dictation.clampSilenceTimeout(self.dictationTimeoutCtrl.GetValue()))
+		conf["conversationsDir"] = self.conversationsDirCtrl.GetValue().strip()
 
 
 def shortStatusForError(error):

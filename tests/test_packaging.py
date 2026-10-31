@@ -39,7 +39,15 @@ class TestCompile(unittest.TestCase):
 			self.assertFalse(os.path.exists(os.path.join(helpers.PACKAGE_DIR, name)), name)
 
 	def test_pureModulesHaveNoNvdaImports(self):
-		for name in ("codexClient.py", "textUtils.py"):
+		for name in (
+			"codexClient.py",
+			"textUtils.py",
+			"conversations.py",
+			"dictation.py",
+			"exporters.py",
+			"folderSnapshot.py",
+			"modelCatalog.py",
+		):
 			with open(os.path.join(helpers.PACKAGE_DIR, name), encoding="utf-8") as f:
 				source = f.read()
 			for nvdaModule in ("import wx", "import gui", "import ui", "import addonHandler", "import config"):
@@ -81,7 +89,7 @@ class TestManifest(unittest.TestCase):
 			parser.read_string("[m]\n" + f.read())
 		manifest = parser["m"]
 		self.assertEqual(manifest["name"], "askGPT")
-		self.assertEqual(manifest["version"], "1.0.0")
+		self.assertEqual(manifest["version"], "1.1.0")
 		self.assertEqual(manifest["minimumNVDAVersion"], "2024.1")
 		self.assertEqual(manifest["lastTestedNVDAVersion"], "2026.1")
 
@@ -97,12 +105,23 @@ class TestBuild(unittest.TestCase):
 		cacheDir = os.path.join(helpers.PACKAGE_DIR, "__pycache__")
 		os.makedirs(cacheDir, exist_ok=True)
 		path = build.build(outDir)
-		self.assertEqual(os.path.basename(path), "askGPT-1.0.0.nvda-addon")
+		self.assertEqual(os.path.basename(path), "askGPT-1.1.0.nvda-addon")
 		with zipfile.ZipFile(path) as archive:
 			names = archive.namelist()
 			self.assertIsNone(archive.testzip())
 		self.assertIn("manifest.ini", names)
-		for module in ("__init__", "codexClient", "dialogs", "textUtils"):
+		for module in (
+			"__init__",
+			"codexClient",
+			"conversationManager",
+			"conversations",
+			"dialogs",
+			"dictation",
+			"exporters",
+			"folderSnapshot",
+			"modelCatalog",
+			"textUtils",
+		):
 			self.assertIn("globalPlugins/askGPT/%s.py" % module, names)
 		self.assertIn("doc/en/readme.html", names)
 		self.assertFalse([n for n in names if "__pycache__" in n or n.endswith(".pyc")])

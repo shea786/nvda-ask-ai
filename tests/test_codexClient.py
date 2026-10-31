@@ -107,8 +107,11 @@ class TestAskCommand(TempDirTestCase):
 			makeClient(popen, self.workDir, model="gpt-5 & calc").ask("hi")
 		self.assertEqual(cm.exception.kind, codexClient.KIND_CONFIG)
 		self.assertEqual(popen.calls, [])
-		with self.assertRaises(CodexError):
-			codexClient.buildExecArgs("out.txt", reasoningEffort="extreme")
+		# Effort names come from Codex's model list (xhigh, max ...), but must stay command-line safe.
+		for effort in ("x high", "low;calc", 'low"', "LOW&", "-c"):
+			with self.assertRaises(CodexError, msg=effort):
+				codexClient.buildExecArgs("out.txt", reasoningEffort=effort)
+		self.assertIn("model_reasoning_effort=xhigh", codexClient.buildExecArgs("out.txt", reasoningEffort="xhigh"))
 
 	def test_windowsCreationFlagsAndJob(self):
 		FakeJob.instances.clear()
@@ -170,6 +173,93 @@ class TestAskCommand(TempDirTestCase):
 			makeClient(popen, self.workDir).ask("hi")
 		self.assertEqual(len(calls), 2)
 		self.assertEqual(os.listdir(self.workDir), [])
+
+
+class TestProjectMode(TempDirTestCase):
+	"""Feature 2: with a project folder Codex works there (-C) and, if allowed, may write files."""
+
+	def setUp(self):
+		super().setUp()
+		self.project = os.path.join(self.workDir, "My Project & Notes")
+		os.makedirs(self.project)
+
+	def test_withoutProjectStaysReadOnlyInPrivateFolder(self):
+		args = codexClient.buildExecArgs("out.txt")
+		self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
+		self.assertNotIn("-C", args)
+		self.assertFalse(any("sandbox_workspace_write" in a for a in args))
+
+	def test_projectWithWritesUsesWorkspaceWriteWithoutNetwork(self):
+		args = codexClient.buildExecArgs("out.txt", projectFolder=self.project, allowWrites=True, isWindows=False)
+		self.assertEqual(args[args.index("--sandbox") + 1], "workspace-write")
+		self.assertEqual(args[args.index("-C") + 1], self.project)
+		self.assertIn("--skip-git-repo-check", args)
+		for override in (
+			"sandbox_workspace_write.network_access=false",
+			"sandbox_workspace_write.exclude_tmpdir_env_var=true",
+			"sandbox_workspace_write.exclude_slash_tmp=true",
+		):
+			self.assertEqual(args[args.index(override) - 1], "-c")
+		self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", args)
+		self.assertNotIn("danger-full-access", args)
+		self.assertEqual(args[-1], "-")
+
+	def test_projectWithoutWritesStaysReadOnly(self):
+		args = codexClient.buildExecArgs("out.txt", projectFolder=self.project, allowWrites=False, isWindows=False)
+		self.assertEqual(args[args.index("--sandbox") + 1], "read-only")
+		self.assertEqual(args[args.index("-C") + 1], self.project, "Codex can still read the project")
+		self.assertFalse(any("sandbox_workspace_write" in a for a in args))
+
+	def test_folderArgumentNeverEndsInBackslash(self):
+		self.assertEqual(codexClient.projectFolderArgument("C:\\", isWindows=True), "C:\\.")
+		self.assertEqual(codexClient.projectFolderArgument("D:\\Work\\Book\\", isWindows=True), "D:\\Work\\Book")
+		self.assertEqual(codexClient.projectFolderArgument("/", isWindows=False), "/.")
+		# The cmd.exe fallback accepts project paths with & and quotes them.
+		args = codexClient.buildExecArgs("C:\\w\\out.txt", projectFolder="C:\\", allowWrites=True, isWindows=True)
+		command = codexClient.buildCommand("C:\\x\\codex.cmd", args, isWindows=True, resolveShim=lambda p: None, env=WIN_ENV)
+		self.assertIn('"-C" "C:\\."', command)
+		args = codexClient.buildExecArgs("C:\\w\\out.txt", projectFolder="C:\\R&D Docs", allowWrites=True, isWindows=True)
+		command = codexClient.buildCommand("C:\\x\\codex.cmd", args, isWindows=True, resolveShim=lambda p: None, env=WIN_ENV)
+		self.assertIn('"-C" "C:\\R&D Docs"', command)
+		with self.assertRaises(CodexError):
+			args = codexClient.buildExecArgs("out.txt", projectFolder="C:\\100%", allowWrites=True, isWindows=True)
+			codexClient.buildCommand("C:\\x\\codex.cmd", args, isWindows=True, resolveShim=lambda p: None, env=WIN_ENV)
+
+	def test_askRunsInTheProjectFolder(self):
+		popen = FakePopen(outputText="Saved notes.txt")
+		client = makeClient(popen, self.workDir, projectFolder=self.project, allowProjectWrites=True)
+		self.assertEqual(client.ask("Question: write notes"), "Saved notes.txt")
+		argv = popen.lastArgv
+		kwargs = popen.calls[-1][1]
+		self.assertEqual(kwargs["cwd"], self.project)
+		self.assertEqual(argv[argv.index("-C") + 1], self.project)
+		self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
+		outputFile = argv[argv.index("-o") + 1]
+		self.assertEqual(os.path.dirname(outputFile), self.workDir, "the answer file never goes into the project")
+		self.assertEqual(os.listdir(self.project), [])
+
+	def test_missingProjectFolderIsReported(self):
+		popen = FakePopen(outputText="x")
+		client = makeClient(popen, self.workDir, projectFolder=os.path.join(self.workDir, "gone"))
+		with self.assertRaises(CodexError) as cm:
+			client.ask("q")
+		self.assertEqual(cm.exception.kind, codexClient.KIND_CONFIG)
+		self.assertEqual(cm.exception.reason, codexClient.REASON_PROJECT_MISSING)
+		self.assertEqual(popen.calls, [])
+
+	def test_projectPromptInstructions(self):
+		plain = codexClient.buildPrompt("q")
+		self.assertNotIn("project folder", plain)
+		project = codexClient.buildPrompt("q", projectFolder=True)
+		self.assertIn(codexClient.PROJECT_INSTRUCTIONS, project)
+		self.assertIn("tell the user the exact file name", project)
+		self.assertIn("Do not modify or delete existing files unless the user asks.", project)
+		self.assertTrue(project.startswith(codexClient.DEFAULT_INSTRUCTIONS))
+
+	def test_modelSlugsWithDots(self):
+		self.assertTrue(codexClient.isValidModel("gpt-6.1-sol"))
+		args = codexClient.buildExecArgs("out.txt", model="gpt-6.1-sol", reasoningEffort="xhigh")
+		self.assertEqual(args[args.index("-m") + 1], "gpt-6.1-sol")
 
 
 class TestProcessControl(TempDirTestCase):

@@ -17,18 +17,24 @@ from gui import settingsDialogs
 from logHandler import log
 from scriptHandler import script
 
-from . import codexClient, dialogs
+from . import codexClient, dialogs, dictation
 
 addonHandler.initTranslation()
 
 confspec = {
 	"codexPath": 'string(default="")',
 	"model": 'string(default="")',
-	"reasoningEffort": 'option("low", "medium", "high", default="low")',
+	# Free text: models offer different levels (low ... xhigh, max); validated before use.
+	"reasoningEffort": 'string(default="low")',
 	"instructions": 'string(default="%s")' % codexClient.DEFAULT_INSTRUCTIONS,
 	"speakAnswers": "boolean(default=True)",
 	"keepContext": "boolean(default=True)",
 	"beepWhileWaiting": "boolean(default=True)",
+	"allowProjectWrites": "boolean(default=True)",
+	# Blank means %LOCALAPPDATA%\\askGPT\\conversations.
+	"conversationsDir": 'string(default="")',
+	"dictationSilenceTimeout": "integer(default=%d, min=%d, max=%d)"
+	% (int(dictation.DEFAULT_SILENCE_TIMEOUT), dictation.MIN_SILENCE_TIMEOUT, dictation.MAX_SILENCE_TIMEOUT),
 	"timeout": "integer(default=%d, min=%d, max=%d)"
 	% (codexClient.DEFAULT_TIMEOUT, codexClient.MIN_TIMEOUT, codexClient.MAX_TIMEOUT),
 }
@@ -44,6 +50,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self.toolsMenuItem = None
+		self.conversationsMenuItem = None
 		if globalVars.appArgs.secure:
 			# Never run on secure screens (sign-in screen, UAC prompts).
 			return
@@ -60,6 +67,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			_("Ask ChatGPT a question and hear the answer"),
 		)
 		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.onToolsMenu, self.toolsMenuItem)
+		self.conversationsMenuItem = toolsMenu.Append(
+			wx.ID_ANY,
+			# Translators: Item in the NVDA Tools menu that lists saved Ask GPT conversations.
+			_("Ask GPT con&versations..."),
+			# Translators: Help text of the conversations menu item.
+			_("Continue, rename, archive, export or delete saved Ask GPT conversations"),
+		)
+		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.onConversationsMenu, self.conversationsMenuItem)
 
 	@staticmethod
 	def _cleanWorkDir():
@@ -70,6 +85,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 	def onToolsMenu(self, evt):
 		wx.CallAfter(dialogs.openAskDialog)
+
+	def onConversationsMenu(self, evt):
+		wx.CallAfter(dialogs.openConversationManager)
 
 	@script(
 		# Translators: Description of the command that opens the Ask GPT dialog.
@@ -83,6 +101,16 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		wx.CallAfter(dialogs.openAskDialog)
 
 	@script(
+		# Translators: Description of the command that opens the list of saved conversations.
+		description=_("Show Ask GPT conversations"),
+		category=SCRIPT_CATEGORY,
+	)
+	def script_showConversations(self, gesture):
+		if globalVars.appArgs.secure:
+			return
+		wx.CallAfter(dialogs.openConversationManager)
+
+	@script(
 		# Translators: Description of the command that repeats the last answer.
 		description=_("Speaks the last answer from GPT. Press twice to show it in a window you can review"),
 		category=SCRIPT_CATEGORY,
@@ -92,6 +120,11 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def script_speakLastAnswer(self, gesture):
 		if globalVars.appArgs.secure:
 			return
+		try:
+			# The current conversation, or after a restart the most recently used saved one.
+			dialogs.state.ensureCurrent()
+		except Exception:
+			log.debugWarning("Ask GPT: could not load the current conversation", exc_info=True)
 		if not dialogs.state.lastAnswer:
 			# Translators: Reported when no answer has been received yet.
 			ui.message(_("No answer from GPT yet."))
@@ -113,10 +146,12 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			settingsDialogs.NVDASettingsDialog.categoryClasses.remove(dialogs.AskGPTSettingsPanel)
 		except ValueError:
 			pass
-		if self.toolsMenuItem is not None:
-			try:
-				gui.mainFrame.sysTrayIcon.toolsMenu.Remove(self.toolsMenuItem)
-			except Exception:
-				log.debugWarning("Ask GPT: error removing menu item", exc_info=True)
-			self.toolsMenuItem = None
+		for item in (self.toolsMenuItem, self.conversationsMenuItem):
+			if item is not None:
+				try:
+					gui.mainFrame.sysTrayIcon.toolsMenu.Remove(item)
+				except Exception:
+					log.debugWarning("Ask GPT: error removing menu item", exc_info=True)
+		self.toolsMenuItem = None
+		self.conversationsMenuItem = None
 		super().terminate()

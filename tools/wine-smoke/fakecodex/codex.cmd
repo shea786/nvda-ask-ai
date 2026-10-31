@@ -7,6 +7,7 @@ rem   codex exec ... -o F -    saves stdin to last-stdin.txt (via sort: Wine has
 rem                            its findstr has no regex), writes the answer to F and stdout, exit 0.
 rem   A prompt containing SLOW waits about 24 s first, to test cancel and the Job Object kill;
 rem   MEDIUM waits about 3 s; FAIL401 prints a Codex-style 401 error on stderr and exits 1.
+rem   MAKEFILE (with -C DIR) writes smoke-report.txt into DIR, as Codex would in a project folder.
 rem Every call is appended to calls.log next to this file.
 setlocal EnableExtensions DisableDelayedExpansion
 set "HERE=%~dp0"
@@ -24,17 +25,26 @@ if /i not "%~1"=="exec" (
 	exit /b 2
 )
 set "OFILE="
+set "PROJ="
 :scan
 if "%~1"=="" goto scanned
 if "%~1"=="-o" set "OFILE=%~2"
+if "%~1"=="-C" set "PROJ=%~2"
 shift
 goto scan
 :scanned
 sort > "%HERE%last-stdin.txt"
 >>"%HERE%calls.log" echo OFILE: %OFILE%
+>>"%HERE%calls.log" echo PROJ: %PROJ%
+>>"%HERE%calls.log" echo CWD: %CD%
+rem MAKEFILE first: earlier turns in the prompt may contain the other keywords.
+findstr /c:MAKEFILE "%HERE%last-stdin.txt" >nul && goto makefile
 findstr /c:SLOW "%HERE%last-stdin.txt" >nul && goto slow
 findstr /c:FAIL401 "%HERE%last-stdin.txt" >nul && goto fail401
 findstr /c:MEDIUM "%HERE%last-stdin.txt" >nul && goto medium
+goto answer
+:makefile
+if defined PROJ >"%PROJ%\smoke-report.txt" echo Report written by the fake codex.
 goto answer
 :slow
 >>"%HERE%calls.log" echo SLOW-START

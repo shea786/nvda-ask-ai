@@ -27,7 +27,7 @@ Step 1: Install Node.js and the Codex program (one time)
 
 Step 2: Install the add-on
 --------------------------
-1. Press Enter on the file askGPT-1.0.0.nvda-addon.
+1. Press Enter on the file askGPT-1.1.0.nvda-addon.
 2. NVDA asks whether you want to install it. This add-on is not from the
    NVDA Add-on Store, so NVDA may warn about that. Choose Yes / Install.
 3. Restart NVDA when it asks.
@@ -55,6 +55,30 @@ Step 4: Ask a question
   open the answer in a window you can read.
 - Escape cancels a question that is still waiting; press it again to close.
 
+New in version 1.1.0
+--------------------
+- Quiet dictation: after Alt+D, NVDA goes silent while Windows voice typing
+  types your words, then says "Dictation finished" and reads what was typed.
+  Speech comes back when you press Enter, Escape or Alt+D again, leave the
+  Question box, or stop speaking for a few seconds (setting: "Dictation
+  silence timeout"). Your speech mode (talk, beeps, on-demand) is kept.
+- Conversations are saved. NVDA+Alt+G continues your last conversation, even
+  after restarting NVDA. Alt+N starts a new one (the old one stays saved).
+- Conversations button (Alt+R), or NVDA menu, Tools, "Ask GPT conversations":
+  a list where you can Continue (Enter), Rename, Archive, Delete, Export
+  (Word, PDF, text...) and Import conversations. They are stored in
+  %LOCALAPPDATA%\askGPT\conversations unless you choose another folder in
+  the settings (for example OneDrive, to use them on another PC).
+- Save answer as (Alt+S): saves the last answer as Word, PDF, text, web page
+  or Markdown, in the project folder or in Documents\Ask GPT.
+- Project folder (Alt+F to choose, Alt+J to read it): GPT can read that
+  folder and, unless you turn it off in the settings, create files there,
+  e.g. "write a cover letter as a Word document". NVDA says "Created: ...".
+  Codex runs in its sandbox (only that folder, no internet while working),
+  but please use a test folder or one with a backup.
+- Model (Alt+M) and Reasoning effort (Alt+E) can be changed per
+  conversation; the list comes from Codex itself.
+
 What to report back
 -------------------
 Please send back answers to these, even if everything worked:
@@ -63,8 +87,16 @@ Please send back answers to these, even if everything worked:
 3. Did NVDA read the label of every control in the Ask GPT settings page?
    In particular, does the "Model" box say its name when you Tab to it?
 4. Did asking a typed question work, and how long did the answer take?
-5. Did Dictate (Windows voice typing) work?
-6. Anything confusing, silent, or spoken twice.
+5. Did Dictate (Windows voice typing) work? Did NVDA stay quiet while you
+   spoke, and did it speak again afterwards (and read what you dictated)?
+   If NVDA ever stayed silent, press NVDA+S to change speech mode and tell us.
+6. Did your conversation come back after restarting NVDA? Did the
+   conversation manager list, rename, archive and delete work?
+7. Did "Save answer as" make a Word and a PDF file you could open?
+8. With a project folder: did GPT create the file you asked for, and did
+   NVDA tell you its name? Which Windows version (e.g. 11 24H2) do you have?
+9. Did the Model list show models, and did changing it work?
+10. Anything confusing, silent, or spoken twice.
 If something goes wrong, open the NVDA menu, Tools, View log, and send the
 lines that mention askGPT (or the whole log).
 

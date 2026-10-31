@@ -24,12 +24,19 @@ SIGKILL = getattr(signal, "SIGKILL", 9)
 DEFAULT_TIMEOUT = 180
 MIN_TIMEOUT = 30
 MAX_TIMEOUT = 600
+# Offered when Codex's model list is unavailable. Models may support more (for example xhigh).
 REASONING_EFFORTS = ("low", "medium", "high")
 DEFAULT_REASONING_EFFORT = "low"
 MAX_HISTORY_TURNS = 10
 MAX_HISTORY_CHARS = 12000
 ANSWER_FILE_PREFIX = "answer-"
 ANSWER_FILE_SUFFIX = ".txt"
+
+PROJECT_INSTRUCTIONS = (
+	"The current working directory is the user's project folder. If the user asks you to create a "
+	"document or file (for example Word, PDF, text, spreadsheet, HTML), save it in this folder, then tell "
+	"the user the exact file name. Do not modify or delete existing files unless the user asks."
+)
 
 DEFAULT_INSTRUCTIONS = (
 	"You are a helpful assistant. Answer the question directly. "
@@ -53,6 +60,7 @@ REASON_CUSTOM_PATH = "customPathMissing"
 REASON_NODE_MISSING = "nodeMissing"
 REASON_INCOMPLETE_INSTALL = "incompleteInstall"
 REASON_EMPTY_ANSWER = "emptyAnswer"
+REASON_PROJECT_MISSING = "projectMissing"
 
 INSTALL_HELP = (
 	"Install Node.js, then run npm install -g @openai/codex in a command prompt, "
@@ -155,6 +163,25 @@ def clampTimeout(value):
 
 def isValidModel(model):
 	return not model or bool(_SAFE_MODEL.match(model))
+
+
+# Effort names come from Codex's model list (low, medium, high, xhigh, max ...) and go on the command line.
+_SAFE_EFFORT = re.compile(r"^[a-z][a-z0-9_-]{0,19}$")
+
+
+def isValidEffort(effort):
+	return not effort or bool(_SAFE_EFFORT.match(effort))
+
+
+def projectFolderArgument(folder, isWindows=IS_WINDOWS):
+	"""The project folder as passed to -C: normalised, and never ending in a backslash
+	("C:\\" becomes "C:\\." because a trailing backslash would escape the closing quote).
+	"""
+	pathModule = ntpath if isWindows else os.path
+	folder = pathModule.normpath(folder)
+	if folder.endswith(("\\", "/")):
+		folder += "."
+	return folder
 
 
 def expandUserPath(path):
@@ -344,23 +371,37 @@ def buildCommand(exePath, args, isWindows=IS_WINDOWS, resolveShim=resolveCmdShim
 	return [exePath] + args
 
 
-def buildExecArgs(outputFile, model="", reasoningEffort=""):
+def buildExecArgs(outputFile, model="", reasoningEffort="", projectFolder="", allowWrites=False, isWindows=IS_WINDOWS):
 	"""Fixed codex exec arguments. The prompt is never on the command line; "-" reads it from stdin.
 	-c values are passed without quotes: Codex parses the value as TOML and, when that fails,
 	uses the raw text as a string (verified with codex-cli 0.160.0).
+	With a project folder, Codex works in it (-C). With allowWrites it may create and edit files there
+	(workspace-write), with network access explicitly off and /tmp and $TMPDIR not writable; otherwise
+	it stays read-only. The approval bypass flag is never used.
 	"""
+	sandbox = "workspace-write" if projectFolder and allowWrites else "read-only"
 	args = [
 		"exec",
 		"--skip-git-repo-check",
 		"--sandbox",
-		"read-only",
+		sandbox,
 		"--color",
 		"never",
 		"-c",
 		"approval_policy=never",
-		"-o",
-		outputFile,
 	]
+	if projectFolder:
+		args += ["-C", projectFolderArgument(projectFolder, isWindows)]
+	if sandbox == "workspace-write":
+		args += [
+			"-c",
+			"sandbox_workspace_write.network_access=false",
+			"-c",
+			"sandbox_workspace_write.exclude_tmpdir_env_var=true",
+			"-c",
+			"sandbox_workspace_write.exclude_slash_tmp=true",
+		]
+	args += ["-o", outputFile]
 	model = (model or "").strip()
 	if model:
 		if not isValidModel(model):
@@ -368,7 +409,7 @@ def buildExecArgs(outputFile, model="", reasoningEffort=""):
 		args += ["-m", model]
 	reasoningEffort = (reasoningEffort or "").strip().lower()
 	if reasoningEffort:
-		if reasoningEffort not in REASONING_EFFORTS:
+		if not isValidEffort(reasoningEffort):
 			raise CodexError(KIND_CONFIG, "Unknown reasoning effort: %s" % reasoningEffort)
 		args += ["-c", "model_reasoning_effort=%s" % reasoningEffort]
 	args.append("-")
@@ -391,13 +432,17 @@ def buildPrompt(
 	instructions=DEFAULT_INSTRUCTIONS,
 	maxTurns=MAX_HISTORY_TURNS,
 	maxChars=MAX_HISTORY_CHARS,
+	projectFolder=False,
 ):
 	"""Build the full prompt text.
+	With projectFolder, the project instructions (save requested files in the working folder) are added.
 	@param history: earlier messages as (role, text) with role "user" or "assistant", oldest first.
 	A turn is one question plus its answer; only the newest maxTurns turns (2 * maxTurns messages)
 	and at most about maxChars characters of them are kept, dropping the oldest first.
 	"""
 	instructions = (instructions or "").strip() or DEFAULT_INSTRUCTIONS
+	if projectFolder:
+		instructions += "\n\n" + PROJECT_INSTRUCTIONS
 	recent = list(history)[-2 * maxTurns:] if maxTurns > 0 else []
 	lines = []
 	for role, text in recent:
@@ -721,8 +766,12 @@ class CodexClient:
 		jobFactory=None,
 		killpg=None,
 		env=None,
+		projectFolder="",
+		allowProjectWrites=True,
 	):
 		self.executablePath = (executablePath or "").strip()
+		self.projectFolder = (projectFolder or "").strip()
+		self.allowProjectWrites = bool(allowProjectWrites)
 		self.workDir = workDir or defaultWorkDir(isWindows=isWindows)
 		self.model = (model or "").strip()
 		self.reasoningEffort = (reasoningEffort or "").strip().lower()
@@ -804,11 +853,12 @@ class CodexClient:
 	def _kill(self, proc, job):
 		killProcessTree(proc, self._isWindows, job=job, killpg=self._killpg, env=self._env)
 
-	def _run(self, args, inputText=None, timeout=None, cancelEvent=None):
+	def _run(self, args, inputText=None, timeout=None, cancelEvent=None, cwd=None):
 		"""Run codex with args. Returns (returnCode, stdoutText, stderrText)."""
 		command = self._command(args)
 		timeout = self.timeout if timeout is None else timeout
-		kwargs = self._baseKwargs(self._ensureWorkDir())
+		workDir = self._ensureWorkDir()
+		kwargs = self._baseKwargs(cwd or workDir)
 		kwargs.update(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 		proc, job = self._launch(command, kwargs)
 		with self._lock:
@@ -895,12 +945,33 @@ class CodexClient:
 
 	def ask(self, prompt, cancelEvent=None):
 		"""Send prompt (already built with buildPrompt) and return the answer text."""
+		projectFolder = self.projectFolder
+		if projectFolder and not os.path.isdir(projectFolder):
+			raise CodexError(
+				KIND_CONFIG,
+				"The project folder no longer exists: %s" % projectFolder,
+				detail=projectFolder,
+				reason=REASON_PROJECT_MISSING,
+			)
 		self._ensureWorkDir()
+		# The answer file stays in the private working folder, never in the project.
 		fd, outputFile = tempfile.mkstemp(prefix=ANSWER_FILE_PREFIX, suffix=ANSWER_FILE_SUFFIX, dir=self.workDir)
 		os.close(fd)
 		try:
-			args = buildExecArgs(outputFile, self.model, self.reasoningEffort)
-			returnCode, stdout, stderr = self._run(args, inputText=prompt, cancelEvent=cancelEvent)
+			args = buildExecArgs(
+				outputFile,
+				self.model,
+				self.reasoningEffort,
+				projectFolder=projectFolder,
+				allowWrites=self.allowProjectWrites,
+				isWindows=self._isWindows,
+			)
+			returnCode, stdout, stderr = self._run(
+				args,
+				inputText=prompt,
+				cancelEvent=cancelEvent,
+				cwd=projectFolder or None,
+			)
 			if returnCode != 0:
 				raise classifyFailure(returnCode, stdout, stderr, prompt)
 			try:
