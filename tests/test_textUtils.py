@@ -4,7 +4,7 @@ import unittest
 
 import helpers  # noqa: F401  (adds the add-on package to sys.path)
 
-from textUtils import formatTurn, stripMarkdown
+from textUtils import estimatedSpeechMs, formatTurn, stripMarkdown
 
 
 class TestStripMarkdown(unittest.TestCase):
@@ -24,6 +24,27 @@ class TestStripMarkdown(unittest.TestCase):
 	def test_codeBlocksKeepContent(self):
 		text = "Run this:\n```python\nprint('hi')\n```\nDone, use `pip list`."
 		self.assertEqual(stripMarkdown(text), "Run this:\nprint('hi')\nDone, use pip list.")
+
+	def test_codeFenceContentIsUntouched(self):
+		# C3: code inside fences keeps every symbol.
+		text = (
+			"Example:\n```python\n# a comment, not a heading\ndef f(*args, **kwargs):\n"
+			"    return __name__  # **not bold**\n- not a bullet\n```\nAfter **bold**."
+		)
+		self.assertEqual(
+			stripMarkdown(text),
+			"Example:\n# a comment, not a heading\ndef f(*args, **kwargs):\n"
+			"    return __name__  # **not bold**\n- not a bullet\nAfter bold.",
+		)
+
+	def test_tildeFenceAndUnclosedFence(self):
+		self.assertEqual(stripMarkdown("~~~\n*x* _y_\n~~~\n*z*"), "*x* _y_\nz")
+		self.assertEqual(stripMarkdown("```\n**kept**"), "**kept**")
+
+	def test_inlineCodeIsUntouched(self):
+		# C3: only the backticks go; the content is verbatim.
+		self.assertEqual(stripMarkdown("Use `my_var_name` and `a * b * c` or ``x `y` z``."), "Use my_var_name and a * b * c or x `y` z.")
+		self.assertEqual(stripMarkdown("Run `**kwargs` now, **really**."), "Run **kwargs now, really.")
 
 	def test_linksAndImages(self):
 		self.assertEqual(
@@ -47,6 +68,14 @@ class TestStripMarkdown(unittest.TestCase):
 
 	def test_collapsesBlankLines(self):
 		self.assertEqual(stripMarkdown("a\r\n\r\n\r\n\r\nb"), "a\n\nb")
+
+
+class TestEstimatedSpeech(unittest.TestCase):
+	def test_boundsAndGrowth(self):
+		# A5: the fallback delay before voice typing depends on the message length.
+		self.assertEqual(estimatedSpeechMs(""), 1500)
+		self.assertGreater(estimatedSpeechMs("x" * 80), estimatedSpeechMs("x" * 40))
+		self.assertEqual(estimatedSpeechMs("x" * 10000), 12000)
 
 
 class TestFormatTurn(unittest.TestCase):

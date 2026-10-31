@@ -12,71 +12,101 @@ Usage counts toward your ChatGPT plan (Plus, Pro, Team or Business). No API key 
 
 <h2>One-time setup</h2>
 <ol>
-<li>Install Node.js (the LTS version) from nodejs.org. Accept the defaults in the installer.</li>
-<li>Open a command prompt: press Windows+R, type <code>cmd</code> and press Enter.</li>
-<li>Type <code>npm install -g @openai/codex</code> and press Enter. Wait until the prompt returns, then type <code>exit</code> and press Enter.
-Alternatively, download the Windows codex executable from github.com/openai/codex/releases and set its path in the add-on settings.</li>
-<li>Install this add-on (open the <code>askGPT-1.0.0.nvda-addon</code> file) and restart NVDA when asked.</li>
-<li>Open the NVDA menu (NVDA+N), choose Preferences, then Settings, and select the <strong>Ask GPT</strong> category.</li>
-<li>Press <strong>Sign in with ChatGPT</strong>. Your web browser opens the ChatGPT sign-in page. Sign in as usual.
-When the browser says you are signed in, return to NVDA. NVDA announces "Signed in with ChatGPT", or you can press <strong>Check status</strong>.</li>
+<li>Install Node.js (the LTS version) from <a href="https://nodejs.org/">nodejs.org</a> and accept the defaults in the installer.
+Or open a command prompt and type <code>winget install OpenJS.NodeJS.LTS</code>, then press Enter.</li>
+<li>Open a new command prompt: press Windows+R, type <code>cmd</code> and press Enter.
+It must be a new one, opened after Node.js was installed.</li>
+<li>Type <code>npm install -g @openai/codex</code> and press Enter. Wait until the prompt returns. This can take a minute.</li>
+<li>Check that it worked: type <code>codex --version</code> and press Enter. You should hear a version number such as "codex-cli 0.160.0".
+If you hear "not recognized" instead, close the command prompt, open a new one and try again.
+Then type <code>exit</code> and press Enter.
+Alternatively, download the Windows codex program from <a href="https://github.com/openai/codex/releases">github.com/openai/codex/releases</a>
+and set its path in the add-on settings.</li>
+<li>Install this add-on (open the <code>askGPT-1.0.0.nvda-addon</code> file), and restart NVDA when asked.</li>
+<li>Open the NVDA menu (NVDA+N), then choose Preferences, then Settings, and select the <strong>Ask GPT</strong> category.</li>
+<li>Press <strong>Sign in with ChatGPT</strong>. NVDA says "Your browser will open. Sign in with your ChatGPT account,
+then come back to NVDA. NVDA will tell you when you are signed in." Your web browser then opens the ChatGPT sign-in page.
+Sign in as usual. The page may ask for a verification code sent by e-mail or text message, a two-factor authentication code,
+or a "verify you are human" check (CAPTCHA). If a CAPTCHA is hard to solve with NVDA, try its audio option, or ask a sighted helper for this one step.</li>
+<li>When the browser says you are signed in, go back to NVDA: press Alt+Tab repeatedly until you hear "NVDA Settings".
+NVDA announces "Signed in with ChatGPT" by itself. You can also press <strong>Check status</strong>.
+If you do not finish within about 3 minutes, NVDA says "Sign-in was not completed. Press Sign in to try again."</li>
 <li>Press OK to close the settings.</li>
 </ol>
-<p>If the browser does not open, open a command prompt and run <code>codex login</code> yourself, then press Check status.</p>
+<p><strong>If the browser did not open</strong>: press <strong>Copy sign-in link</strong> (Alt+Y) in the Ask GPT settings
+right after pressing Sign in, then open your browser, press Alt+D or Control+L to move to the address bar, paste with Control+V and press Enter.
+You can also open a command prompt and type <code>codex login</code>.</p>
 
 <h2>Asking a question</h2>
 <ol>
 <li>Press <strong>NVDA+Alt+G</strong> from anywhere, or choose NVDA menu, Tools, Ask GPT. The Ask GPT dialog opens with the cursor in the Question box.</li>
-<li>Type your question and press <strong>Enter</strong>. Use Shift+Enter if you want a new line inside the question.</li>
-<li>NVDA says "Asking GPT" and plays a soft beep every two seconds while waiting. Answers usually take 5 to 30 seconds.</li>
+<li>Type your question and press <strong>Enter</strong> to send it. To start a new line inside the question instead, press Shift+Enter.</li>
+<li>NVDA says "Asking GPT" and plays a soft beep every two seconds while waiting (you can turn the beep off in the settings). Answers usually take 5 to 30 seconds.</li>
 <li>When the answer arrives, NVDA reads it. It is also added to the Conversation box.</li>
 <li>Type a follow-up question and press Enter. GPT remembers the earlier questions of this conversation.</li>
 </ol>
 <p>While waiting, press <strong>Escape</strong> (or the Cancel button, Alt+C) to cancel the question. When nothing is pending, Escape closes the dialog.
+If you close the dialog with the Close button while GPT is still working, the question keeps running, and NVDA speaks the answer when it is ready.
 The conversation is kept when you close the dialog, until you choose New conversation or restart NVDA.</p>
+
+<h2>Stopping and replaying answers</h2>
+<ul>
+<li>Press <strong>Control</strong> to stop NVDA reading an answer.</li>
+<li>Press <strong>NVDA+Alt+Shift+G</strong> from anywhere to hear the last answer again, even after closing the dialog.</li>
+<li>Press NVDA+Alt+Shift+G <strong>twice quickly</strong> to open the last answer in a window you can read with the arrow keys, line by line or word by word,
+exactly as GPT wrote it, including any code. Press Escape to close that window.</li>
+</ul>
 
 <h2>Asking by voice</h2>
 <p>Press <strong>Alt+D</strong> (Dictate). NVDA says "Voice typing. Speak your question, then press Enter to send."
 After the message, Windows voice typing opens. Speak your question; the words are typed into the Question box. Then press Enter to send.
-This uses the voice typing built into Windows 10 and 11 (the same as pressing Windows+H). It needs an internet connection and
-"Online speech recognition" turned on in Windows Settings, Privacy, Speech. Headphones help so the microphone does not hear NVDA.</p>
+This uses the voice typing built into Windows 10 and 11 (the same as pressing Windows+H). It needs an internet connection, and
+"Online speech recognition" turned on in Windows Settings, Privacy, Speech. Headphones help so the microphone does not hear NVDA.
+If you switch to another window before voice typing opens, it is not started, and NVDA tells you.</p>
 
 <h2>Reviewing answers</h2>
 <ul>
-<li>Press Alt+V to move to the Conversation box, then use the arrow keys to read the conversation line by line. Moving there places you at the start of the newest answer.</li>
-<li>Copy last answer (Alt+O) copies the latest answer to the clipboard.</li>
-<li>New conversation (Alt+N) clears the conversation so GPT forgets earlier questions.</li>
-<li>Press <strong>NVDA+Alt+Shift+G</strong> from anywhere to hear the last answer again, even after closing the dialog. Press it twice quickly to open the answer in a window you can read with the arrow keys.</li>
+<li>Press Alt+V to move to the Conversation box, then use the arrow keys to read the conversation line by line.
+The cursor is placed at the start of the newest answer, also when you open the dialog again. It is never moved while you are reading the box.</li>
+<li>Copy last answer (Alt+O) copies the latest answer to the clipboard exactly as GPT wrote it.</li>
+<li>New conversation (Alt+N) asks for confirmation, then clears the conversation so GPT forgets earlier questions.</li>
 </ul>
-<p>Both keyboard commands can be changed in NVDA menu, Preferences, Input gestures, category Ask GPT.</p>
+<p>The keyboard commands NVDA+Alt+G and NVDA+Alt+Shift+G can be changed in NVDA menu, Preferences, Input gestures, category Ask GPT.</p>
 
 <h2>Settings</h2>
 <p>NVDA menu, Preferences, Settings, Ask GPT:</p>
 <ul>
-<li><strong>Status</strong>: shows Signed in with ChatGPT, Not signed in, or Codex CLI not found.</li>
-<li><strong>Sign in with ChatGPT</strong>, <strong>Check status</strong>, <strong>Sign out</strong>.</li>
-<li><strong>Codex executable path</strong>: leave blank to find Codex automatically. Use Browse to choose codex.exe or codex.cmd if it is installed somewhere unusual.</li>
-<li><strong>Model</strong>: leave blank to use the default model for your ChatGPT plan, or type a model name such as gpt-5.</li>
-<li><strong>Reasoning effort</strong>: Low is fastest and fine for most questions. Medium and High think longer.</li>
-<li><strong>Instructions for GPT</strong>: tells GPT how to answer. The default asks for short plain-text answers suited to a screen reader.</li>
-<li><strong>Speak answers automatically</strong> (on by default).</li>
-<li><strong>Keep conversation context for follow-up questions</strong> (on by default). About the last 10 questions and answers are sent along with each new question.</li>
-<li><strong>Answer timeout in seconds</strong> (default 180, from 30 to 600).</li>
+<li><strong>Status</strong>: shows Signed in with ChatGPT, Not signed in, Codex CLI not found, or Node.js not found.</li>
+<li><strong>Sign in with ChatGPT</strong> (Alt+S), <strong>Check status</strong> (Alt+H), <strong>Sign out</strong> (Alt+U, asks for confirmation),
+<strong>Copy sign-in link</strong> (Alt+Y, available while signing in).</li>
+<li><strong>Codex executable path</strong> (Alt+X): leave blank to find Codex automatically. Use Browse (Alt+B) to choose codex.exe or codex.cmd
+if it is installed somewhere unusual. For an npm install the path is <code>%APPDATA%\npm\codex.cmd</code>; you can type it exactly like that.</li>
+<li><strong>Model</strong> (Alt+M): leave blank to use the default model for your ChatGPT plan, or type a model name such as gpt-5.</li>
+<li><strong>Reasoning effort</strong> (Alt+R): Low is fastest and fine for most questions. Medium and High think longer.</li>
+<li><strong>Instructions for GPT</strong> (Alt+I): tells GPT how to answer. The default asks for short plain-text answers suited to a screen reader.</li>
+<li><strong>Speak answers automatically</strong> (Alt+P, on by default).</li>
+<li><strong>Keep conversation context for follow-up questions</strong> (Alt+K, on by default). About the last 10 questions and answers are sent along with each new question.</li>
+<li><strong>Beep while waiting for an answer</strong> (Alt+W, on by default).</li>
+<li><strong>Answer timeout in seconds</strong> (Alt+T, default 180, from 30 to 600).</li>
 </ul>
 
 <h2>Troubleshooting</h2>
 <ul>
-<li><strong>"The OpenAI Codex program was not found"</strong>: install it as described above, then restart NVDA. If it still is not found, set the Codex executable path. For an npm install it is usually <code>C:\Users\your name\AppData\Roaming\npm\codex.cmd</code>.</li>
+<li><strong>"The OpenAI Codex program was not found"</strong>: install it as described above, then restart NVDA. If it still is not found,
+set the Codex executable path to <code>%APPDATA%\npm\codex.cmd</code>.</li>
+<li><strong>"Node.js was not found"</strong>: Codex was installed with npm, but Node.js is missing. Install Node.js (see step 1), then restart NVDA.</li>
 <li><strong>"Codex is not signed in"</strong>: the add-on offers to open its settings; press Sign in with ChatGPT.</li>
 <li><strong>"Signed in with an API key"</strong>: Codex is using an API key, which is billed per use. Press Sign out, then Sign in with ChatGPT.</li>
 <li><strong>"You have reached the usage limit of your ChatGPT plan"</strong>: Codex usage limits depend on your plan. Try again later.</li>
+<li><strong>"Couldn't reach ChatGPT"</strong>: check your internet connection and try again.</li>
 <li><strong>No answer in time</strong>: try again, choose a lower reasoning effort, or increase the timeout.</li>
+<li>Error entries in the Conversation box end with "Technical details", which you can copy into a support request.</li>
 </ul>
 
 <h2>Privacy</h2>
 <p>Your questions, and the earlier part of the conversation when context is on, are sent to OpenAI by the Codex program under your ChatGPT account.
-Codex runs in a read-only sandbox in an empty folder inside your NVDA settings folder (askGPT-workdir) and is told not to run commands or touch files.
+Codex runs in a read-only sandbox in an empty folder (<code>%LOCALAPPDATA%\askGPT\workdir</code>) and is told not to run commands or touch files.
 Codex may keep its own session logs in the .codex folder in your user profile. The add-on itself does not store questions or answers on disk.
-The add-on does nothing on secure screens such as the Windows sign-in screen.</p>
+When NVDA exits, any running Codex program is stopped. The add-on does nothing on secure screens such as the Windows sign-in screen.</p>
 </body>
 </html>

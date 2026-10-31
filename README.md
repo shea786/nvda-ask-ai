@@ -35,21 +35,30 @@ tests/                                     unittest suite, runs on Linux
 `codexClient.CodexClient.ask()` runs:
 
 ```
-codex exec --skip-git-repo-check --sandbox read-only --color never -c approval_policy="never" \
-           -o <workdir>/answer-XXXX.txt [-m <model>] [-c model_reasoning_effort="<effort>"] -
+codex exec --skip-git-repo-check --sandbox read-only --color never -c approval_policy=never \
+           -o <workdir>/answer-XXXX.txt [-m <model>] [-c model_reasoning_effort=<effort>] -
 ```
 
 * The prompt, made of the instructions, the earlier conversation (the last 10 exchanges and at most about 12,000 characters) and the question,
   is written to **stdin** as UTF-8. User text never appears on the command line.
-* The working directory is an empty folder, `<NVDA config>/askGPT-workdir`.
-* On Windows the process starts with `CREATE_NO_WINDOW`. An npm `codex.cmd` shim is resolved to `node <codex.js>` when possible.
-  Otherwise it runs through `cmd.exe /d /s /c "..."`, which only ever receives fixed arguments and validated paths.
+* `-c` values are unquoted: Codex parses them as TOML and uses non-TOML text as a plain string (checked with codex-cli 0.160.0).
+* The working directory is an empty folder, `%LOCALAPPDATA%\askGPT\workdir` (or the temp folder). Stale `answer-*.txt` files are deleted at startup.
+* On Windows the process starts with `CREATE_NO_WINDOW` and is put in a kill-on-close Job Object, so Codex never outlives NVDA.
+  On other systems it gets its own process group (`start_new_session`), which is killed as a whole.
+* An npm `codex.cmd` shim is resolved to `node <codex.js>`. Node.js is looked for next to the shim, on PATH and in `%ProgramFiles%\nodejs`;
+  if it is missing, the user gets a Node.js-specific message. Only unrecognised `.cmd` files run through
+  `%SystemRoot%\System32\cmd.exe /d /v:off /s /c`, with every argument quoted and `"`, `%` and line breaks refused.
 * The answer is read from the `-o` file, with trimmed stdout as the fallback.
-* Cancel and timeout kill the process tree (`taskkill /T /F /PID` on Windows).
-* Failures become a `CodexError` with a `kind`: notInstalled, notLoggedIn, usageLimit, timeout, cancelled, config or other.
-  The classification matches text heuristically, because Codex has no stable error codes.
+* Cancel, timeout and NVDA exit kill the process tree: the Job Object, falling back to `%SystemRoot%\System32\taskkill.exe /T /F`.
+* Failures become a `CodexError` with a `kind`: notInstalled, notLoggedIn, usageLimit, network, timeout, cancelled, config or other.
+  The classification is heuristic, because Codex has no stable error codes. It only looks at Codex's `ERROR` lines and the last
+  few stderr lines outside the header and the user/thinking/codex sections. It uses word boundaries, and treats numbers as HTTP
+  statuses only in context such as `status 429` or `401 Unauthorized`.
+* The spoken message is always plain language. Technical detail goes to the NVDA log and, after "Technical details:", to the Conversation box.
+* `codex login` prints the sign-in link on stderr. The add-on reads it and offers a "Copy sign-in link" button.
 
 All Codex calls run in daemon threads. UI updates go through `wx.CallAfter`, and every callback checks that its dialog or panel still exists.
+A question belongs to the module, not the dialog. Closing the dialog leaves it running and the answer is spoken; `GlobalPlugin.terminate()` kills it.
 
 ## Development
 

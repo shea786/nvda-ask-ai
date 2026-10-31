@@ -52,6 +52,28 @@ class TestCompile(unittest.TestCase):
 					self.assertFalse(line.startswith("    "), "%s:%d uses spaces" % (path, lineNumber))
 
 
+class TestUserDocs(unittest.TestCase):
+	def test_readmeSetupGuidance(self):
+		# A8: setup must be followable without sighted help.
+		with open(os.path.join(ROOT, "addon", "doc", "en", "readme.html"), encoding="utf-8") as f:
+			html = f.read()
+		for required in (
+			"winget install OpenJS.NodeJS.LTS",
+			"codex --version",
+			'<a href="https://nodejs.org/">',
+			'<a href="https://github.com/openai/codex/releases">',
+			"Alt+Tab repeatedly until you hear \"NVDA Settings\"",
+			"CAPTCHA",
+			"two-factor",
+			"%APPDATA%\\npm\\codex.cmd",
+			"Copy sign-in link",
+			"Press <strong>Control</strong> to stop",
+			"twice quickly",
+			"Shift+Enter",
+		):
+			self.assertIn(required, html)
+
+
 class TestManifest(unittest.TestCase):
 	def test_manifestFields(self):
 		parser = configparser.ConfigParser(interpolation=None)

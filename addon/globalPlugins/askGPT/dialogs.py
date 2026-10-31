@@ -1,7 +1,8 @@
 # -*- coding: UTF-8 -*-
-# Ask GPT NVDA add-on: the Ask dialog and the settings panel.
+# Ask GPT NVDA add-on: the Ask dialog, the settings panel and the request lifecycle.
 
 import os
+import subprocess
 import threading
 
 import wx
@@ -18,39 +19,90 @@ from logHandler import log
 
 from . import codexClient
 from .codexClient import CodexClient, CodexError
-from .textUtils import formatTurn, stripMarkdown
+from .textUtils import estimatedSpeechMs, formatTurn, stripMarkdown
 
 addonHandler.initTranslation()
 
 CONFIG_SECTION = "askGPT"
-# Set by the global plugin to a folder inside NVDA's configuration directory.
+# Set by the global plugin (see codexClient.defaultWorkDir).
 workDir = None
-# Keep at most this many messages (questions plus answers) in memory.
+# Keep at most this many messages (questions plus answers) for context.
 MAX_STORED_MESSAGES = 100
+# Keep at most this many entries in the Conversation box.
+MAX_TRANSCRIPT_ENTRIES = 100
 BEEP_INTERVAL_MS = 2000
+# How long to wait for the user to finish signing in in the browser.
+LOGIN_TIMEOUT_SECONDS = 180
+# Delay before announcing after moving focus, so the focus announcement does not swallow it.
+ANNOUNCE_AFTER_FOCUS_MS = 100
+
+
+def _once(func):
+	"""Wrap func so that it runs at most once, whichever trigger fires first."""
+	done = []
+
+	def wrapper(*args):
+		if not done:
+			done.append(True)
+			func(*args)
+
+	return wrapper
+
+
+class PendingRequest:
+	"""A question being answered. Owned by the module, so it survives closing the dialog."""
+
+	def __init__(self, client, question):
+		self.client = client
+		self.question = question
+		self.cancelEvent = threading.Event()
 
 
 class ConversationState:
 	"""Conversation shared between dialog instances, so closing the dialog keeps the context."""
 
 	def __init__(self):
-		self.history = []  # (role, text), role is "user" or "assistant".
-		self.transcript = []  # Lines shown in the conversation view.
-		self.lastAnswer = ""
+		self.history = []  # (role, raw text), role is "user" or "assistant".
+		self.transcript = []  # Entries shown in the Conversation box (Markdown stripped).
+		self.lastAnswer = ""  # Raw answer text, for copying and the browseable window.
+		self.lastAnswerIndex = None  # Index in transcript of the newest answer.
+		self.pending = None
 
 	def clear(self):
 		self.history = []
 		self.transcript = []
 		self.lastAnswer = ""
+		self.lastAnswerIndex = None
+
+	@property
+	def lastAnswerSpoken(self):
+		return stripMarkdown(self.lastAnswer) or self.lastAnswer
 
 	def addExchange(self, question, answer):
 		self.history.append(("user", question))
 		self.history.append(("assistant", answer))
 		del self.history[:-MAX_STORED_MESSAGES]
 
+	def appendTranscript(self, text, isAnswer=False):
+		"""Add an entry, dropping the oldest beyond MAX_TRANSCRIPT_ENTRIES. Returns how many were dropped."""
+		self.transcript.append(text)
+		if isAnswer:
+			self.lastAnswerIndex = len(self.transcript) - 1
+		dropped = max(0, len(self.transcript) - MAX_TRANSCRIPT_ENTRIES)
+		if dropped:
+			del self.transcript[:dropped]
+			if self.lastAnswerIndex is not None:
+				self.lastAnswerIndex -= dropped
+				if self.lastAnswerIndex < 0:
+					self.lastAnswerIndex = None
+		return dropped
+
 
 state = ConversationState()
+# The client running `codex login`. Only read and written on the main thread.
 _loginClient = None
+# The open settings panel, if any, so background results can refresh it.
+_activePanel = None
 
 
 def getConf():
@@ -69,17 +121,33 @@ def makeClient(executablePath=None):
 
 
 def friendlyError(error):
-	"""Translated, human readable message for a CodexError."""
+	"""Translated, plain-language message for a CodexError. Never includes technical detail."""
 	kind = getattr(error, "kind", codexClient.KIND_OTHER)
-	installHelp = _(
-		# Translators: How to install the Codex program. Keep the command and web address unchanged.
-		'Install Node.js from nodejs.org, then run "npm install -g @openai/codex" in a command prompt, '
-		"or download codex from github.com/openai/codex/releases. Then restart NVDA, "
-		"or set the Codex executable path in NVDA menu, Preferences, Settings, Ask GPT."
-	)
+	reason = getattr(error, "reason", "")
 	if kind == codexClient.KIND_NOT_INSTALLED:
-		# Translators: Error when the Codex program cannot be found. {help} explains how to install it.
-		return _("The OpenAI Codex program was not found or could not start. {help}").format(help=installHelp)
+		if reason == codexClient.REASON_CUSTOM_PATH:
+			# Translators: Error when the configured Codex path is wrong. {path} is the path.
+			return _(
+				"The Codex executable path set in the Ask GPT settings does not exist: {path}. "
+				"Correct it, or clear it to find Codex automatically."
+			).format(path=error.detail)
+		if reason == codexClient.REASON_NODE_MISSING:
+			# Translators: Error when Node.js, needed by Codex, is missing.
+			return _(
+				"Node.js was not found. Codex installed with npm needs it: install Node.js from nodejs.org "
+				"or with the command winget install OpenJS.NodeJS.LTS, then restart NVDA."
+			)
+		if reason == codexClient.REASON_INCOMPLETE_INSTALL:
+			# Translators: Error when the Codex installation is broken.
+			return _(
+				'The Codex installation is incomplete. Run "npm install -g @openai/codex" again '
+				"in a command prompt, then restart NVDA."
+			)
+		# Translators: Error when the Codex program cannot be found. Keep the command and address unchanged.
+		return _(
+			"The OpenAI Codex program was not found. Install Node.js from nodejs.org, then run "
+			'"npm install -g @openai/codex" in a command prompt, then restart NVDA.'
+		)
 	if kind == codexClient.KIND_NOT_LOGGED_IN:
 		# Translators: Error when Codex is not signed in.
 		return _(
@@ -89,20 +157,33 @@ def friendlyError(error):
 	if kind == codexClient.KIND_USAGE_LIMIT:
 		# Translators: Error when the ChatGPT plan's usage limit is reached.
 		return _("You have reached the usage limit of your ChatGPT plan. Please try again later.")
+	if kind == codexClient.KIND_NETWORK:
+		# Translators: Error when ChatGPT cannot be reached.
+		return _("Couldn't reach ChatGPT. Check your internet connection and try again.")
 	if kind == codexClient.KIND_TIMEOUT:
 		# Translators: Error when no answer came in time.
-		return _(
-			"No answer arrived in time. Try again, or increase the timeout in the Ask GPT settings."
-		)
+		return _("No answer arrived in time. Try again, or increase the timeout in the Ask GPT settings.")
 	if kind == codexClient.KIND_CANCELLED:
 		# Translators: Reported when the user cancels a question.
 		return _("Request cancelled.")
 	if kind == codexClient.KIND_CONFIG:
-		# Translators: Error about an invalid setting. {detail} is the technical explanation.
-		return _("A setting is not valid: {detail}").format(detail=error)
-	detail = getattr(error, "detail", "") or str(error)
-	# Translators: Generic error. {detail} is the technical explanation.
-	return _("Something went wrong while asking GPT. {detail}").format(detail=detail).strip()
+		# Translators: Error about an invalid setting. {message} explains it.
+		return _("A setting is not valid: {message}").format(message=error.message)
+	if reason == codexClient.REASON_EMPTY_ANSWER:
+		# Translators: Error when GPT returned nothing.
+		return _("GPT returned an empty answer. Please try asking again.")
+	# For other failures the client's message is already plain language without technical detail.
+	return getattr(error, "message", "") or _("Something went wrong while asking GPT.")
+
+
+def transcriptErrorText(error):
+	"""Friendly message, then the technical detail after a label, for the Conversation box only."""
+	text = friendlyError(error)
+	detail = getattr(error, "detail", "")
+	if detail and getattr(error, "reason", "") != codexClient.REASON_CUSTOM_PATH:
+		# Translators: Introduces technical error details in the conversation.
+		text += " " + _("Technical details: {detail}").format(detail=detail)
+	return text
 
 
 def showError(message, parent=None):
@@ -110,10 +191,10 @@ def showError(message, parent=None):
 	title = _("Ask GPT error")
 	try:
 		from gui.message import MessageDialog  # NVDA 2025.1 and later.
-
-		MessageDialog.alert(message, title, parent)
 	except ImportError:
 		gui.messageBox(message, title, wx.OK | wx.ICON_ERROR, parent)
+		return
+	MessageDialog.alert(message, title, parent)
 
 
 def askYesNo(message, title, parent=None):
@@ -124,15 +205,130 @@ def askYesNo(message, title, parent=None):
 	return MessageDialog.ask(message, title, parent) == ReturnCode.YES
 
 
+def speakThen(message, callback):
+	"""Speak message, then run callback once speech has finished (or after an estimated delay,
+	for example when speech is off). Used before actions that steal focus or listen to the microphone.
+	"""
+	callback = _once(callback)
+	try:
+		import speech
+		from speech.commands import CallbackCommand
+
+		speech.speak([message, CallbackCommand(lambda: wx.CallAfter(callback), name="askGPT.afterSpeech")])
+		try:
+			import braille
+
+			braille.handler.message(message)
+		except Exception:
+			pass
+	except Exception:
+		log.debugWarning("Ask GPT: speech callback unavailable", exc_info=True)
+		ui.message(message)
+	wx.CallLater(estimatedSpeechMs(message), callback)
+
+
 def openSettings():
 	gui.mainFrame.popupSettingsDialog(NVDASettingsDialog, AskGPTSettingsPanel)
 
 
+# Request lifecycle (main thread unless noted)
+
+
+def startRequest(question):
+	conf = getConf()
+	history = list(state.history) if conf["keepContext"] else []
+	prompt = codexClient.buildPrompt(question, history, conf["instructions"])
+	pending = PendingRequest(makeClient(), question)
+	state.pending = pending
+	threading.Thread(target=_requestWorker, args=(pending, prompt), name="askGPT.ask", daemon=True).start()
+	return pending
+
+
+def _requestWorker(pending, prompt):
+	"""Background thread."""
+	try:
+		answer = pending.client.ask(prompt, pending.cancelEvent)
+	except CodexError as e:
+		if e.kind != codexClient.KIND_CANCELLED:
+			log.debugWarning("Ask GPT: %s: %s | %s" % (e.kind, e.message, e.detail))
+		wx.CallAfter(_onRequestDone, pending, None, e)
+	except Exception as e:
+		log.error("Ask GPT: unexpected error", exc_info=True)
+		error = CodexError(codexClient.KIND_OTHER, "Something went wrong while asking GPT.", str(e))
+		wx.CallAfter(_onRequestDone, pending, None, error)
+	else:
+		wx.CallAfter(_onRequestDone, pending, answer, None)
+
+
+def cancelRequest():
+	"""Cancel the running request, if any. Returns it, or None."""
+	pending = state.pending
+	if pending is None:
+		return None
+	state.pending = None
+	pending.cancelEvent.set()
+	return pending
+
+
+def _onRequestDone(pending, answer, error):
+	if pending is not state.pending:
+		return  # Cancelled, or replaced by a newer conversation.
+	state.pending = None
+	dialog = AskGPTDialog.getInstance()
+	if error is None:
+		state.addExchange(pending.question, answer)
+		state.lastAnswer = answer
+		spoken = state.lastAnswerSpoken
+		# Translators: Speaker name for GPT's lines in the conversation.
+		dropped = state.appendTranscript(formatTurn(_("GPT"), spoken), isAnswer=True)
+		if dialog is not None:
+			dialog.onAnswer(spoken, dropped)
+		elif getConf()["speakAnswers"]:
+			ui.message(spoken)
+		else:
+			# Translators: Announced when an answer arrives after the dialog was closed and speaking is off.
+			ui.message(_("GPT's answer is ready. Press NVDA+Alt+Shift+G to hear it."))
+		return
+	# Translators: Prefix for error lines in the conversation.
+	dropped = state.appendTranscript(formatTurn(_("Error"), transcriptErrorText(error)))
+	if dialog is not None:
+		dialog.onFailure(pending.question, error, dropped)
+	else:
+		ui.message(friendlyError(error))
+
+
 def cancelLogin():
+	"""Stop a running `codex login` synchronously. Main thread."""
 	global _loginClient
-	if _loginClient is not None:
-		_loginClient.cancelLogin()
-		_loginClient = None
+	client, _loginClient = _loginClient, None
+	if client is not None:
+		client.cancelLogin()
+
+
+def _finishLogin(client, timedOut):
+	"""Main thread, after `codex login` exited or timed out. Compare-and-clear avoids races with a
+	newer sign-in attempt, sign-out or shutdown, which replace or clear _loginClient first.
+	"""
+	global _loginClient
+	if _loginClient is not client:
+		return
+	_loginClient = None
+	client.cancelLogin()  # Kills the process if it is still waiting, and releases its job.
+	if timedOut:
+		# Translators: Announced when the user did not finish signing in.
+		ui.message(_("Sign-in was not completed. Press Sign in to try again."))
+		_refreshPanel()
+		return
+
+	def check():
+		try:
+			loggedIn, text = client.loginStatus()
+		except Exception:
+			log.debugWarning("Ask GPT: status check after sign-in failed", exc_info=True)
+			loggedIn, text = False, ""
+		wx.CallAfter(_announceLoginResult, loggedIn, text)
+
+	threading.Thread(target=check, name="askGPT.loginCheck", daemon=True).start()
 
 
 def _announceLoginResult(loggedIn, text):
@@ -144,7 +340,23 @@ def _announceLoginResult(loggedIn, text):
 		ui.message(_("Signed in with ChatGPT."))
 	else:
 		# Translators: Announced when sign-in did not complete.
-		ui.message(_("Not signed in. You can press Sign in with ChatGPT to try again."))
+		ui.message(_("Sign-in was not completed. Press Sign in to try again."))
+	_refreshPanel()
+
+
+def _refreshPanel():
+	panel = _activePanel
+	if panel is not None and panel:
+		panel.refreshStatus()
+
+
+def shutdown():
+	"""Kill everything synchronously. Called from GlobalPlugin.terminate()."""
+	pending = cancelRequest()
+	if pending is not None:
+		pending.client.terminate()
+	cancelLogin()
+	closeAskDialog()
 
 
 class AskGPTDialog(wx.Dialog):
@@ -164,11 +376,9 @@ class AskGPTDialog(wx.Dialog):
 		# Translators: Title of the Ask GPT dialog.
 		super().__init__(parent, title=_("Ask GPT"), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
 		AskGPTDialog._instance = self
-		self._requestId = 0
-		self._cancelEvent = None
 		self._busy = False
-		self._pendingQuestion = ""
 		self._dictateToken = 0
+		self._lastAnswerPos = None
 		self.beepTimer = wx.Timer(self)
 
 		mainSizer = wx.BoxSizer(wx.VERTICAL)
@@ -176,7 +386,7 @@ class AskGPTDialog(wx.Dialog):
 
 		self.questionCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the box where the question is typed.
-			_("&Question (Enter sends, Shift+Enter starts a new line):"),
+			_("&Question:"),
 			wx.TextCtrl,
 			style=wx.TE_MULTILINE,
 			size=(500, 80),
@@ -199,9 +409,11 @@ class AskGPTDialog(wx.Dialog):
 			style=wx.TE_MULTILINE | wx.TE_READONLY,
 			size=(500, 250),
 		)
-		if state.transcript:
-			self.conversationCtrl.SetValue("\n\n".join(state.transcript))
-			self.conversationCtrl.SetInsertionPointEnd()
+		self._fillConversation()
+		if self._lastAnswerPos is not None:
+			# Reopening lands on the beginning of the newest answer.
+			self.conversationCtrl.SetInsertionPoint(self._lastAnswerPos)
+			self.conversationCtrl.ShowPosition(self._lastAnswerPos)
 
 		bottomButtons = guiHelper.ButtonHelper(wx.HORIZONTAL)
 		# Translators: Button that copies the last answer to the clipboard.
@@ -223,6 +435,8 @@ class AskGPTDialog(wx.Dialog):
 		self.Bind(wx.EVT_CHAR_HOOK, self.onCharHook)
 		self.Bind(wx.EVT_CLOSE, self.onClose)
 		self.Bind(wx.EVT_TIMER, self.onBeepTimer, self.beepTimer)
+		if state.pending is not None:
+			self._setBusy(True)  # A question asked before the dialog was closed is still running.
 		self.questionCtrl.SetFocus()
 
 	# Keyboard
@@ -230,8 +444,8 @@ class AskGPTDialog(wx.Dialog):
 	def onCharHook(self, evt):
 		key = evt.GetKeyCode()
 		if key == wx.WXK_ESCAPE:
-			if self._busy:
-				self.cancelRequest(announce=True)
+			if state.pending is not None:
+				self.cancel(announce=True)
 			else:
 				self.Close()
 			return
@@ -243,16 +457,20 @@ class AskGPTDialog(wx.Dialog):
 			return
 		evt.Skip()
 
+	def _announceAfterFocus(self, control, message):
+		control.SetFocus()
+		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, message)
+
 	# Asking
 
 	def onAskButton(self, evt):
-		if self._busy:
-			self.cancelRequest(announce=True)
+		if state.pending is not None:
+			self.cancel(announce=True)
 		else:
 			self.ask()
 
 	def ask(self):
-		if self._busy:
+		if state.pending is not None:
 			# Translators: Reported when the user tries to send while an answer is pending.
 			ui.message(_("Still waiting for the answer. Press Escape to cancel."))
 			return
@@ -262,105 +480,64 @@ class AskGPTDialog(wx.Dialog):
 			ui.message(_("Type or dictate a question first."))
 			self.questionCtrl.SetFocus()
 			return
-		conf = getConf()
-		history = list(state.history) if conf["keepContext"] else []
-		prompt = codexClient.buildPrompt(question, history, conf["instructions"])
-		client = makeClient()
+		startRequest(question)
 		# Translators: Speaker name for the user's lines in the conversation.
-		self._appendTranscript(formatTurn(_("You"), question))
-		self._pendingQuestion = question
+		entry = formatTurn(_("You"), question)
+		self._showEntry(entry, state.appendTranscript(entry))
 		self.questionCtrl.Clear()
-		self._requestId += 1
-		requestId = self._requestId
-		cancelEvent = threading.Event()
-		self._cancelEvent = cancelEvent
 		self._setBusy(True)
 		# Translators: Announced while waiting for an answer.
 		ui.message(_("Asking GPT…"))
-		threading.Thread(
-			target=self._askWorker,
-			args=(client, prompt, cancelEvent, requestId, question),
-			name="askGPT.ask",
-			daemon=True,
-		).start()
 
-	def _askWorker(self, client, prompt, cancelEvent, requestId, question):
-		try:
-			answer = client.ask(prompt, cancelEvent)
-		except CodexError as e:
-			if e.kind not in (codexClient.KIND_CANCELLED,):
-				log.debugWarning("Ask GPT: %s (%s) %s" % (e.kind, e.message, e.detail))
-			wx.CallAfter(self._onFailure, requestId, question, e)
-		except Exception as e:
-			log.error("Ask GPT: unexpected error", exc_info=True)
-			wx.CallAfter(self._onFailure, requestId, question, CodexError(codexClient.KIND_OTHER, str(e)))
-		else:
-			wx.CallAfter(self._onAnswer, requestId, question, answer)
-
-	def _onAnswer(self, requestId, question, answer):
-		plain = stripMarkdown(answer) or answer
-		if not self or requestId != self._requestId:
-			return
+	def onAnswer(self, spoken, dropped):
 		self._setBusy(False)
-		state.addExchange(question, answer)
-		state.lastAnswer = plain
-		# Translators: Speaker name for GPT's lines in the conversation.
-		self._appendTranscript(formatTurn(_("GPT"), plain), moveCaretToStart=True)
+		self._showEntry(state.transcript[-1], dropped, isAnswer=True)
 		if getConf()["speakAnswers"]:
-			ui.message(plain)
+			ui.message(spoken)
 		else:
 			# Translators: Announced when an answer arrives and automatic speaking is off.
 			ui.message(_("Answer received. It is in the conversation box."))
 
-	def _onFailure(self, requestId, question, error):
-		if not self or requestId != self._requestId:
-			return
+	def onFailure(self, question, error, dropped):
 		self._setBusy(False)
-		message = friendlyError(error)
-		# Translators: Prefix for error lines in the conversation.
-		self._appendTranscript(formatTurn(_("Error"), message))
+		self._showEntry(state.transcript[-1], dropped)
 		if not self.questionCtrl.GetValue().strip():
 			self.questionCtrl.SetValue(question)
 			self.questionCtrl.SetInsertionPointEnd()
-		if error.kind == codexClient.KIND_CANCELLED:
-			ui.message(message)
+		if error.kind == codexClient.KIND_NOT_LOGGED_IN:
+			# Translators: Yes/No question after a sign-in error.
+			offer = _("Codex is not signed in to ChatGPT; open the Ask GPT settings to sign in?")
+		elif error.kind == codexClient.KIND_NOT_INSTALLED:
+			# Translators: Yes/No question after Codex could not be started.
+			offer = _("The Codex program could not be started; open the Ask GPT settings?")
+		else:
+			showError(friendlyError(error), self)
 			return
-		if error.kind in (codexClient.KIND_NOT_LOGGED_IN, codexClient.KIND_NOT_INSTALLED):
-			# Translators: Question offering to open the settings after an error.
-			offer = message + "\n\n" + _("Open the Ask GPT settings now?")
-			if askYesNo(offer, _("Ask GPT"), self):
-				openSettings()
-			return
-		showError(message, self)
+		if askYesNo(offer, _("Ask GPT"), self):
+			openSettings()
 
-	def cancelRequest(self, announce=False):
-		if not self._busy:
+	def cancel(self, announce=False):
+		pending = cancelRequest()
+		if pending is None:
 			return
-		if self._cancelEvent is not None:
-			self._cancelEvent.set()
-		# Invalidate the pending request so a late reply is ignored.
-		self._requestId += 1
 		self._setBusy(False)
-		if self._pendingQuestion and not self.questionCtrl.GetValue().strip():
-			self.questionCtrl.SetValue(self._pendingQuestion)
+		if not self.questionCtrl.GetValue().strip():
+			self.questionCtrl.SetValue(pending.question)
 			self.questionCtrl.SetInsertionPointEnd()
 		if announce:
 			# Translators: Announced when the user cancels a question.
-			ui.message(_("Request cancelled."))
-			self.questionCtrl.SetFocus()
+			self._announceAfterFocus(self.questionCtrl, _("Request cancelled."))
 
 	def _setBusy(self, busy):
 		self._busy = busy
 		if busy:
 			# Translators: Label of the Ask button while waiting; pressing it cancels.
 			self.askButton.SetLabel(_("&Cancel"))
-			self.dictateButton.Disable()
-			self.beepTimer.Start(BEEP_INTERVAL_MS)
+			if getConf()["beepWhileWaiting"]:
+				self.beepTimer.Start(BEEP_INTERVAL_MS)
 		else:
 			self.beepTimer.Stop()
 			self.askButton.SetLabel(_("&Ask"))
-			self.dictateButton.Enable()
-			self._cancelEvent = None
 
 	def onBeepTimer(self, evt):
 		if self._busy:
@@ -368,17 +545,40 @@ class AskGPTDialog(wx.Dialog):
 
 	# Conversation view
 
-	def _appendTranscript(self, text, moveCaretToStart=False):
-		state.transcript.append(text)
+	def _fillConversation(self):
+		"""Rebuild the Conversation box from state, remembering where the newest answer starts."""
 		ctrl = self.conversationCtrl
-		if ctrl.GetLastPosition() > 0:
-			ctrl.AppendText("\n\n")
-		start = ctrl.GetLastPosition()
-		ctrl.AppendText(text)
-		if moveCaretToStart:
-			# So that moving to the conversation lands on the beginning of the newest answer.
-			ctrl.SetInsertionPoint(start)
-			ctrl.ShowPosition(start)
+		ctrl.Clear()
+		self._lastAnswerPos = None
+		for index, entry in enumerate(state.transcript):
+			if index:
+				ctrl.AppendText("\n\n")
+			if index == state.lastAnswerIndex:
+				self._lastAnswerPos = ctrl.GetLastPosition()
+			ctrl.AppendText(entry)
+
+	def _showEntry(self, text, dropped, isAnswer=False):
+		"""Mirror an entry already added to state.transcript into the Conversation box."""
+		ctrl = self.conversationCtrl
+		hasFocus = self.FindFocus() == ctrl
+		if dropped:
+			# Old entries were dropped from the start; rebuild (rare: after MAX_TRANSCRIPT_ENTRIES entries).
+			caret = ctrl.GetInsertionPoint()
+			self._fillConversation()
+			if hasFocus:
+				ctrl.SetInsertionPoint(min(caret, ctrl.GetLastPosition()))
+				return
+		else:
+			if ctrl.GetLastPosition() > 0:
+				ctrl.AppendText("\n\n")
+			start = ctrl.GetLastPosition()
+			ctrl.AppendText(text)
+			if isAnswer:
+				self._lastAnswerPos = start
+		if isAnswer and not hasFocus and self._lastAnswerPos is not None:
+			# Moving to the conversation then lands on the newest answer; never move a caret the user is using.
+			ctrl.SetInsertionPoint(self._lastAnswerPos)
+			ctrl.ShowPosition(self._lastAnswerPos)
 
 	def onCopy(self, evt):
 		if not state.lastAnswer:
@@ -393,51 +593,54 @@ class AskGPTDialog(wx.Dialog):
 			ui.message(_("Could not copy to the clipboard."))
 
 	def onNewConversation(self, evt):
-		self.cancelRequest()
+		if state.transcript or state.pending is not None:
+			# Translators: Confirmation before clearing the conversation.
+			if not askYesNo(_("Clear the current conversation and start a new one?"), _("Ask GPT"), self):
+				return
+		cancelRequest()
+		self._setBusy(False)
 		state.clear()
 		self.conversationCtrl.Clear()
+		self._lastAnswerPos = None
 		self.questionCtrl.Clear()
-		self._pendingQuestion = ""
 		# Translators: Announced when the conversation is cleared.
-		ui.message(_("New conversation started."))
-		self.questionCtrl.SetFocus()
+		self._announceAfterFocus(self.questionCtrl, _("New conversation started."))
 
 	# Voice input
 
 	def onDictate(self, evt):
-		if self._busy:
+		# The button stays enabled while busy so focus never lands on a disabled control.
+		if state.pending is not None:
+			# Translators: Reported when Dictate is pressed while waiting for an answer.
+			ui.message(_("Still waiting for the answer. Press Escape to cancel first."))
 			return
 		self.questionCtrl.SetFocus()
 		self._dictateToken += 1
-		token = self._dictateToken
+		# Let the focus announcement finish before speaking.
+		wx.CallLater(250, self._announceDictation, self._dictateToken)
+
+	def _announceDictation(self, token):
+		if not self or token != self._dictateToken:
+			return
 		# Translators: Announced before Windows voice typing opens.
 		message = _("Voice typing. Speak your question, then press Enter to send.")
 
 		def startVoiceTyping():
 			if not self or token != self._dictateToken:
 				return
-			self._dictateToken += 1  # Only once, whichever trigger fires first.
-			self.questionCtrl.SetFocus()
+			self._dictateToken += 1
 			# Let focus settle before opening voice typing.
 			wx.CallLater(300, self._sendVoiceTypingKey)
 
 		# Open voice typing only after the announcement, so the microphone does not hear NVDA.
-		try:
-			import braille
-			import speech
-			from speech.commands import CallbackCommand
-
-			speech.speak([message, CallbackCommand(lambda: wx.CallAfter(startVoiceTyping), name="askGPT.dictate")])
-			braille.handler.message(message)
-			# Fallback in case speech is off and the callback never runs.
-			wx.CallLater(6000, startVoiceTyping)
-		except Exception:
-			log.debugWarning("Ask GPT: speech callback unavailable", exc_info=True)
-			ui.message(message)
-			wx.CallLater(2000, startVoiceTyping)
+		speakThen(message, startVoiceTyping)
 
 	def _sendVoiceTypingKey(self):
 		if not self:
+			return
+		if not self.IsActive() or self.FindFocus() != self.questionCtrl:
+			# Translators: Reported when voice typing was not started because focus moved.
+			ui.message(_("Voice typing was not started because the focus left the question box."))
 			return
 		try:
 			import keyboardHandler
@@ -451,7 +654,13 @@ class AskGPTDialog(wx.Dialog):
 	# Closing
 
 	def onClose(self, evt):
-		self.cancelRequest()
+		if state.pending is not None:
+			if getConf()["speakAnswers"]:
+				# Translators: Announced when the dialog is closed while waiting for an answer.
+				ui.message(_("GPT will speak the answer when it's ready."))
+			else:
+				# Translators: Announced when the dialog is closed while waiting and speaking is off.
+				ui.message(_("GPT is still working. You will hear when the answer is ready."))
 		self._dictateToken += 1
 		self.beepTimer.Stop()
 		if AskGPTDialog._instance is self:
@@ -481,6 +690,9 @@ def closeAskDialog():
 
 
 class AskGPTSettingsPanel(SettingsPanel):
+	# Mnemonics used here: S, H, U, Y, X, B, M, R, I, P, K, W, T.
+	# The NVDA Settings dialog itself owns O (OK), C (Cancel, Categories) and A (Apply).
+
 	# Translators: Title of the Ask GPT category in NVDA settings.
 	title = _("Ask GPT")
 	# Translators: Description of the Ask GPT settings, read when the category opens.
@@ -492,8 +704,12 @@ class AskGPTSettingsPanel(SettingsPanel):
 	)
 
 	def makeSettings(self, settingsSizer):
+		global _activePanel
+		_activePanel = self
+		self.Bind(wx.EVT_WINDOW_DESTROY, self._onDestroy)
 		conf = getConf()
 		self._statusGeneration = 0
+		self._loginUrl = None
 		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
 		description = sHelper.addItem(wx.StaticText(self, label=self.panelDescription))
 		description.Wrap(self.scaleSize(544))
@@ -516,14 +732,18 @@ class AskGPTSettingsPanel(SettingsPanel):
 		checkButton = accountButtons.addButton(self, label=_("C&heck status"))
 		checkButton.Bind(wx.EVT_BUTTON, lambda evt: self.refreshStatus(announce=True))
 		# Translators: Button that signs out of ChatGPT in Codex.
-		signOutButton = accountButtons.addButton(self, label=_("Sign &out"))
+		signOutButton = accountButtons.addButton(self, label=_("Sign o&ut"))
 		signOutButton.Bind(wx.EVT_BUTTON, self.onSignOut)
+		# Translators: Button that copies the sign-in web address, for when the browser did not open.
+		self.copyLinkButton = accountButtons.addButton(self, label=_("Cop&y sign-in link"))
+		self.copyLinkButton.Bind(wx.EVT_BUTTON, self.onCopyLink)
+		self.copyLinkButton.Disable()
 		sHelper.addItem(accountButtons)
 
 		pathHelper = guiHelper.BoxSizerHelper(self, orientation=wx.HORIZONTAL)
 		self.pathCtrl = pathHelper.addLabeledControl(
 			# Translators: Label of the Codex program path field.
-			_("Codex executable path (leave blank to detect automatically):"),
+			_("Codex e&xecutable path (leave blank to detect automatically):"),
 			wx.TextCtrl,
 			size=(300, -1),
 		)
@@ -573,7 +793,7 @@ class AskGPTSettingsPanel(SettingsPanel):
 
 		self.speakCheck = sHelper.addItem(
 			# Translators: Checkbox to speak answers automatically.
-			wx.CheckBox(self, label=_("Speak &answers automatically")),
+			wx.CheckBox(self, label=_("S&peak answers automatically")),
 		)
 		self.speakCheck.SetValue(conf["speakAnswers"])
 		self.contextCheck = sHelper.addItem(
@@ -581,6 +801,11 @@ class AskGPTSettingsPanel(SettingsPanel):
 			wx.CheckBox(self, label=_("&Keep conversation context for follow-up questions")),
 		)
 		self.contextCheck.SetValue(conf["keepContext"])
+		self.beepCheck = sHelper.addItem(
+			# Translators: Checkbox to play a soft beep every two seconds while waiting for an answer.
+			wx.CheckBox(self, label=_("Beep &while waiting for an answer")),
+		)
+		self.beepCheck.SetValue(conf["beepWhileWaiting"])
 
 		self.timeoutCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the timeout spin control.
@@ -590,6 +815,12 @@ class AskGPTSettingsPanel(SettingsPanel):
 			max=codexClient.MAX_TIMEOUT,
 			initial=conf["timeout"],
 		)
+
+	def _onDestroy(self, evt):
+		global _activePanel
+		if evt.GetEventObject() is self and _activePanel is self:
+			_activePanel = None
+		evt.Skip()
 
 	def onPanelActivated(self):
 		super().onPanelActivated()
@@ -601,7 +832,8 @@ class AskGPTSettingsPanel(SettingsPanel):
 		if not self or generation != self._statusGeneration:
 			return
 		self.statusCtrl.SetValue(text)
-		if announce:
+		# Also announce when the user is reading the Status field, so its changes are not missed.
+		if announce or self.FindFocus() == self.statusCtrl:
 			ui.message(text)
 
 	def refreshStatus(self, announce=False):
@@ -614,19 +846,16 @@ class AskGPTSettingsPanel(SettingsPanel):
 			try:
 				loggedIn, text = client.loginStatus()
 			except CodexError as e:
-				if e.kind == codexClient.KIND_NOT_INSTALLED:
-					# Translators: Status when the Codex program cannot be found.
-					status = _("Codex CLI not found")
-				else:
-					# Translators: Status when the check failed. {error} is the reason.
-					status = _("Could not check the status: {error}").format(error=friendlyError(e))
-			except Exception as e:
+				log.debugWarning("Ask GPT: status check: %s: %s | %s" % (e.kind, e.message, e.detail))
+				status = shortStatusForError(e)
+			except Exception:
 				log.error("Ask GPT: status check failed", exc_info=True)
-				status = _("Could not check the status: {error}").format(error=e)
+				# Translators: Status when the check failed.
+				status = _("Could not check the status")
 			else:
 				if loggedIn and codexClient.isApiKeyLogin(text):
 					# Translators: Status when Codex uses an API key instead of a ChatGPT account.
-					status = _("Signed in with an API key (billed per use, not to your ChatGPT plan)")
+					status = _("Signed in with an API key, which is billed per use")
 				elif loggedIn:
 					# Translators: Status when signed in.
 					status = _("Signed in with ChatGPT")
@@ -639,49 +868,71 @@ class AskGPTSettingsPanel(SettingsPanel):
 
 	def onSignIn(self, evt):
 		global _loginClient
+		# Kill any running login before starting a new one.
 		cancelLogin()
 		client = makeClient(executablePath=self.pathCtrl.GetValue())
 		try:
-			proc = client.login()
+			client.locate()
 		except CodexError as e:
 			showError(friendlyError(e), self)
 			self.refreshStatus()
 			return
-		_loginClient = client
+		self._loginUrl = None
+		self.copyLinkButton.Disable()
 		self._statusGeneration += 1
 		# Translators: Status while the user signs in in the browser.
-		self.statusCtrl.SetValue(_("Waiting for you to sign in in your browser…"))
-		ui.message(
-			# Translators: Announced when sign-in starts.
-			_(
-				"Your browser will open. Sign in with your ChatGPT account, "
-				"then come back and press Check status."
-			),
+		self.statusCtrl.SetValue(_("Waiting for you to sign in in your browser"))
+		# Translators: Announced before the browser opens for sign-in.
+		message = _(
+			"Your browser will open. Sign in with your ChatGPT account, then come back to NVDA. "
+			"NVDA will tell you when you are signed in."
 		)
+		_loginClient = client
+		# Start the browser only after the message, so the focus change does not cut it off.
+		speakThen(message, lambda: self._startLogin(client))
+
+	def _startLogin(self, client):
+		if _loginClient is not client:
+			return  # Cancelled, superseded or shut down while the message was spoken.
+		try:
+			proc = client.login(onUrl=lambda url: wx.CallAfter(self._onLoginUrl, client, url))
+		except CodexError as e:
+			cancelLogin()
+			showError(friendlyError(e), self if self else None)
+			_refreshPanel()
+			return
 
 		def waiter():
-			global _loginClient
 			try:
-				proc.wait(timeout=600)
+				proc.wait(timeout=LOGIN_TIMEOUT_SECONDS)
+				timedOut = False
+			except subprocess.TimeoutExpired:
+				timedOut = True
 			except Exception:
-				client.cancelLogin()
-			if _loginClient is not client:
-				return  # Superseded by a newer sign-in attempt, sign-out or add-on shutdown.
-			_loginClient = None
-			try:
-				loggedIn, text = client.loginStatus()
-			except Exception:
-				return
-			wx.CallAfter(_announceLoginResult, loggedIn, text)
-			wx.CallAfter(self._refreshIfAlive)
+				timedOut = False
+			wx.CallAfter(_finishLogin, client, timedOut)
 
 		threading.Thread(target=waiter, name="askGPT.login", daemon=True).start()
 
-	def _refreshIfAlive(self):
-		if self:
-			self.refreshStatus()
+	def _onLoginUrl(self, client, url):
+		if not self or _loginClient is not client:
+			return
+		self._loginUrl = url
+		self.copyLinkButton.Enable()
+
+	def onCopyLink(self, evt):
+		if not self._loginUrl:
+			return
+		if api.copyToClip(self._loginUrl):
+			# Translators: Announced after copying the sign-in link.
+			ui.message(_("Sign-in link copied. Paste it into your browser's address bar."))
+		else:
+			ui.message(_("Could not copy to the clipboard."))
 
 	def onSignOut(self, evt):
+		# Translators: Confirmation before signing out.
+		if not askYesNo(_("Sign out of ChatGPT in Codex?"), _("Ask GPT"), self):
+			return
 		cancelLogin()
 		self._statusGeneration += 1
 		generation = self._statusGeneration
@@ -691,19 +942,25 @@ class AskGPTSettingsPanel(SettingsPanel):
 			try:
 				ok, text = client.logout()
 				# Translators: Status after signing out.
-				status = _("Signed out") if ok else (text or _("Not signed in"))
+				status = _("Signed out") if ok else (text.splitlines()[0] if text else _("Not signed in"))
 			except CodexError as e:
-				status = friendlyError(e)
+				log.debugWarning("Ask GPT: sign out: %s: %s | %s" % (e.kind, e.message, e.detail))
+				status = shortStatusForError(e)
+			except Exception:
+				log.error("Ask GPT: sign out failed", exc_info=True)
+				# Translators: Status when signing out failed.
+				status = _("Could not sign out")
 			wx.CallAfter(self._setStatus, generation, status, True)
 
 		threading.Thread(target=worker, name="askGPT.logout", daemon=True).start()
 
 	def onBrowse(self, evt):
+		currentPath = codexClient.expandUserPath(self.pathCtrl.GetValue())
 		with wx.FileDialog(
 			self,
 			# Translators: Title of the file chooser for the Codex program.
 			_("Select the Codex program"),
-			defaultDir=os.path.dirname(self.pathCtrl.GetValue()),
+			defaultDir=os.path.dirname(currentPath),
 			# Translators: File type filter in the file chooser.
 			wildcard=_("Programs (*.exe;*.cmd)|*.exe;*.cmd|All files (*.*)|*.*"),
 			style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
@@ -715,12 +972,15 @@ class AskGPTSettingsPanel(SettingsPanel):
 	# Saving
 
 	def isValid(self):
-		path = self.pathCtrl.GetValue().strip().strip('"')
-		if path and not os.path.isfile(path):
-			# Translators: Error when the Codex path does not exist.
-			showError(_("The Codex executable path does not exist: {path}").format(path=path), self)
-			self.pathCtrl.SetFocus()
-			return False
+		rawPath = self.pathCtrl.GetValue().strip()
+		# Only check the path when it was changed, so an unplugged drive does not block saving other settings.
+		if rawPath and rawPath != getConf()["codexPath"]:
+			path = codexClient.expandUserPath(rawPath)
+			if not os.path.isfile(path):
+				# Translators: Error when the Codex path does not exist.
+				showError(_("The Codex executable path does not exist: {path}").format(path=path), self)
+				self.pathCtrl.SetFocus()
+				return False
 		model = self.modelCtrl.GetValue().strip()
 		if not codexClient.isValidModel(model):
 			showError(
@@ -734,7 +994,7 @@ class AskGPTSettingsPanel(SettingsPanel):
 
 	def onSave(self):
 		conf = getConf()
-		conf["codexPath"] = self.pathCtrl.GetValue().strip().strip('"')
+		conf["codexPath"] = self.pathCtrl.GetValue().strip()
 		conf["model"] = self.modelCtrl.GetValue().strip()
 		selection = self.effortCtrl.GetSelection()
 		conf["reasoningEffort"] = self._effortValues[selection] if selection >= 0 else "low"
@@ -742,4 +1002,26 @@ class AskGPTSettingsPanel(SettingsPanel):
 		conf["instructions"] = instructions or codexClient.DEFAULT_INSTRUCTIONS
 		conf["speakAnswers"] = self.speakCheck.GetValue()
 		conf["keepContext"] = self.contextCheck.GetValue()
+		conf["beepWhileWaiting"] = self.beepCheck.GetValue()
 		conf["timeout"] = codexClient.clampTimeout(self.timeoutCtrl.GetValue())
+
+
+def shortStatusForError(error):
+	"""One short sentence for the Status field."""
+	if error.kind == codexClient.KIND_NOT_INSTALLED:
+		if error.reason == codexClient.REASON_NODE_MISSING:
+			# Translators: Status when Node.js is missing.
+			return _("Node.js not found")
+		if error.reason == codexClient.REASON_CUSTOM_PATH:
+			# Translators: Status when the configured path is wrong.
+			return _("Codex executable path not found")
+		# Translators: Status when the Codex program cannot be found.
+		return _("Codex CLI not found")
+	if error.kind == codexClient.KIND_NETWORK:
+		# Translators: Status when ChatGPT cannot be reached.
+		return _("Could not reach ChatGPT")
+	if error.kind == codexClient.KIND_TIMEOUT:
+		# Translators: Status when the check took too long.
+		return _("The status check timed out")
+	# Translators: Status when the check failed.
+	return _("Could not check the status")

@@ -26,6 +26,7 @@ class FakeProcess:
 	def __init__(self, argv, stdout=b"", stderr=b"", returncode=0, outputText=None, hang=False):
 		self.argv = argv
 		self.pid = 4242
+		self._handle = 777  # Windows process handle, used by Job Objects.
 		self.stdin = CapturingBytesIO()
 		self.stdout = io.BytesIO(stdout)
 		self.stderr = io.BytesIO(stderr)
@@ -72,3 +73,31 @@ class FakePopen:
 	@property
 	def lastArgv(self):
 		return self.calls[-1][0]
+
+
+class FakeJob:
+	"""Stands in for codexClient.WindowsJob."""
+
+	instances = []
+
+	def __init__(self, assignResult=True, terminateResult=True):
+		self.assignResult = assignResult
+		self.terminateResult = terminateResult
+		self.assigned = []
+		self.terminated = False
+		self.closed = False
+		FakeJob.instances.append(self)
+
+	def assign(self, proc):
+		self.assigned.append(proc)
+		return self.assignResult
+
+	def terminate(self):
+		self.terminated = True
+		if self.terminateResult:
+			for proc in self.assigned:
+				proc.kill()
+		return self.terminateResult
+
+	def close(self):
+		self.closed = True

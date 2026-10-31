@@ -2,7 +2,7 @@
 # Ask GPT NVDA add-on: ask ChatGPT questions through the OpenAI Codex CLI,
 # signed in with a ChatGPT account, and hear the answers.
 
-import os
+import threading
 
 import wx
 
@@ -28,6 +28,7 @@ confspec = {
 	"instructions": 'string(default="%s")' % codexClient.DEFAULT_INSTRUCTIONS,
 	"speakAnswers": "boolean(default=True)",
 	"keepContext": "boolean(default=True)",
+	"beepWhileWaiting": "boolean(default=True)",
 	"timeout": "integer(default=%d, min=%d, max=%d)"
 	% (codexClient.DEFAULT_TIMEOUT, codexClient.MIN_TIMEOUT, codexClient.MAX_TIMEOUT),
 }
@@ -46,7 +47,9 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		if globalVars.appArgs.secure:
 			# Never run on secure screens (sign-in screen, UAC prompts).
 			return
-		dialogs.workDir = os.path.join(globalVars.appArgs.configPath, "askGPT-workdir")
+		# Outside NVDA's configuration folder, so it is never copied or synced with the settings.
+		dialogs.workDir = codexClient.defaultWorkDir()
+		threading.Thread(target=self._cleanWorkDir, name="askGPT.cleanup", daemon=True).start()
 		settingsDialogs.NVDASettingsDialog.categoryClasses.append(dialogs.AskGPTSettingsPanel)
 		toolsMenu = gui.mainFrame.sysTrayIcon.toolsMenu
 		self.toolsMenuItem = toolsMenu.Append(
@@ -57,6 +60,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			_("Ask ChatGPT a question and hear the answer"),
 		)
 		gui.mainFrame.sysTrayIcon.Bind(wx.EVT_MENU, self.onToolsMenu, self.toolsMenuItem)
+
+	@staticmethod
+	def _cleanWorkDir():
+		try:
+			codexClient.cleanStaleAnswerFiles(dialogs.workDir)
+		except Exception:
+			log.debugWarning("Ask GPT: could not clean the working folder", exc_info=True)
 
 	def onToolsMenu(self, evt):
 		wx.CallAfter(dialogs.openAskDialog)
@@ -82,23 +92,23 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def script_speakLastAnswer(self, gesture):
 		if globalVars.appArgs.secure:
 			return
-		answer = dialogs.state.lastAnswer
-		if not answer:
+		if not dialogs.state.lastAnswer:
 			# Translators: Reported when no answer has been received yet.
 			ui.message(_("No answer from GPT yet."))
 			return
 		if scriptHandler.getLastScriptRepeatCount() >= 1:
+			# The window shows the answer exactly as GPT wrote it, including code.
 			# Translators: Title of the window showing the last answer.
-			ui.browseableMessage(answer, _("Last GPT answer"))
+			ui.browseableMessage(dialogs.state.lastAnswer, _("Last GPT answer"))
 		else:
-			ui.message(answer)
+			ui.message(dialogs.state.lastAnswerSpoken)
 
 	def terminate(self):
 		try:
-			dialogs.cancelLogin()
-			dialogs.closeAskDialog()
+			# Kills a running question and sign-in synchronously, then closes the dialog.
+			dialogs.shutdown()
 		except Exception:
-			log.debugWarning("Ask GPT: error closing dialog", exc_info=True)
+			log.debugWarning("Ask GPT: error during shutdown", exc_info=True)
 		try:
 			settingsDialogs.NVDASettingsDialog.categoryClasses.remove(dialogs.AskGPTSettingsPanel)
 		except ValueError:
