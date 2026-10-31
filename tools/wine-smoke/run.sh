@@ -7,10 +7,10 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-export WINEPREFIX="${WINEPREFIX:-/home/asif/.t3/scratch/nvda-wine/prefix}"
+export WINEPREFIX="${WINEPREFIX:-$HOME/nvda-wine/prefix}"
 export WINEDEBUG="${WINEDEBUG:--all}"
 export DISPLAY="${SMOKE_DISPLAY:-:77}"
-OUT="${OUT:-/home/asif/.t3/scratch/nvda-wine/out}"
+OUT="${OUT:-$HOME/nvda-wine/out}"
 WINESERVER="${WINESERVER:-/usr/lib/x86_64-linux-gnu/wine/wineserver}"
 C="$WINEPREFIX/drive_c"
 CONF="$C/nvda/userConfig"

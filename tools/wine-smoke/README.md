@@ -15,9 +15,9 @@ ChatGPT usage is spent. Nothing here is shipped; `build.py` only packages `addon
 
 One-time setup (NVDA 2026.x fails under Wine 10.0: `GetConsoleSelectionInfo` is missing from kernel32):
 
-    export WINEPREFIX=/home/asif/.t3/scratch/nvda-wine/prefix WINEARCH=win64
+    export WINEPREFIX=$HOME/nvda-wine/prefix WINEARCH=win64
     wineboot -i
     wine nvda_2025.3.3.exe --create-portable-silent --portable-path='C:\nvda'   # files appear; the launcher may hang on exit
 
-Then run `tools/wine-smoke/run.sh`. Output goes to `/home/asif/.t3/scratch/nvda-wine/out` (override with `OUT=`).
+Then run `tools/wine-smoke/run.sh`. Output goes to `$HOME/nvda-wine/out` (override with `OUT=`).
 Wine cannot show real speech, UIA/IA2 semantics, Win+H voice typing or a real Codex sign-in.
