@@ -165,7 +165,7 @@ class TestManifest(unittest.TestCase):
 		self.assertEqual(manifest["summary"], '"Ask AI"')
 		self.assertEqual(manifest["version"], "1.2.0")
 		self.assertEqual(manifest["author"], '"Asif Ali"')
-		self.assertEqual(manifest["url"], '"https://github.com/shea786/nvda-ask-gpt"')
+		self.assertEqual(manifest["url"], '"https://github.com/shea786/nvda-ask-ai"')
 		self.assertIn("ChatGPT", manifest["description"])
 		self.assertIn("Claude", manifest["description"])
 		self.assertEqual(manifest["minimumNVDAVersion"], "2024.1")

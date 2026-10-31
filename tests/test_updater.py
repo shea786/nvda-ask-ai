@@ -45,7 +45,7 @@ def makeAddon(manifest='name = askAI\nsummary = "Ask AI"\nversion = 1.3.0\n', ex
 
 ADDON_BYTES = makeAddon()
 ADDON_SHA = hashlib.sha256(ADDON_BYTES).hexdigest()
-DL = "https://github.com/shea786/nvda-ask-gpt/releases/download"
+DL = "https://github.com/shea786/nvda-ask-ai/releases/download"
 
 
 def releaseJson(tag="v1.3.0", prerelease=False, draft=False, assets=None, version=None):
@@ -61,7 +61,7 @@ def releaseJson(tag="v1.3.0", prerelease=False, draft=False, assets=None, versio
 		"body": "Release notes for %s." % version,
 		"tag_name": tag,
 		"name": "Ask AI %s" % version,
-		"html_url": "https://github.com/shea786/nvda-ask-gpt/releases/tag/%s" % tag,
+		"html_url": "https://github.com/shea786/nvda-ask-ai/releases/tag/%s" % tag,
 		"prerelease": prerelease,
 		"draft": draft,
 		"assets": assets,
@@ -278,7 +278,7 @@ class TestFetch(unittest.TestCase):
 		self.assertEqual(updater.fetchJson(updater.LATEST_URL, urlopen)["tag_name"], "v1.3.0")
 		request, timeout = urlopen.requests[0]
 		self.assertEqual(timeout, 10)
-		self.assertEqual(request.get_header("User-agent"), "askAI-NVDA-addon/1.2.0 (+https://github.com/shea786/nvda-ask-gpt)")
+		self.assertEqual(request.get_header("User-agent"), "askAI-NVDA-addon/1.2.0 (+https://github.com/shea786/nvda-ask-ai)")
 		self.assertEqual(request.get_header("Accept"), "application/vnd.github+json")
 
 	def test_errors(self):
@@ -430,12 +430,12 @@ class TestChecksumsAndDownload(unittest.TestCase):
 		self.assertTrue(updater.isPinnedAssetUrl(base + "askAI-1.3.0.nvda-addon", "v1.3.0"))
 		for url, tag in (
 			(DL + "/v1.2.9/askAI-1.3.0.nvda-addon", "v1.3.0"),
-			("https://github.com/attacker/nvda-ask-gpt/releases/download/v1.3.0/askAI-1.3.0.nvda-addon", "v1.3.0"),
-			("https://github.com/shea786/nvda-ask-gpt-evil/releases/download/v1.3.0/a.nvda-addon", "v1.3.0"),
+			("https://github.com/attacker/nvda-ask-ai/releases/download/v1.3.0/askAI-1.3.0.nvda-addon", "v1.3.0"),
+			("https://github.com/shea786/nvda-ask-ai-evil/releases/download/v1.3.0/a.nvda-addon", "v1.3.0"),
 			(base + "sub/askAI-1.3.0.nvda-addon", "v1.3.0"),
 			(base + "askAI-1.3.0.nvda-addon?x=1", "v1.3.0"),
 			(base, "v1.3.0"),
-			("http://github.com/shea786/nvda-ask-gpt/releases/download/v1.3.0/a.nvda-addon", "v1.3.0"),
+			("http://github.com/shea786/nvda-ask-ai/releases/download/v1.3.0/a.nvda-addon", "v1.3.0"),
 			("https://objects.githubusercontent.com/github-production-release-asset/x", "v1.3.0"),
 			(base + "a.nvda-addon", ""),
 		):

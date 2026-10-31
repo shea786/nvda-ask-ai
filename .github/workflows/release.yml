@@ -1,7 +1,7 @@
 name: Release
 
 # Builds, signs and publishes a GitHub release when a version tag is pushed, for example v1.2.0 or v1.2.0-beta1.
-# The job runs in the "release" environment, which needs a required reviewer and holds the signing key secret
+# The job runs in the "release" environment, which holds the signing key secret (a required reviewer is optional)
 # ASKAI_SIGNING_KEY (see RELEASING.md).
 on:
   push:

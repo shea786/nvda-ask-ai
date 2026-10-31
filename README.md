@@ -250,7 +250,7 @@ Older files load with defaults (schema 1 files from Ask GPT 1.x as ChatGPT conve
 
 ### Updates
 
-`updater.py` only installs a release whose assets are under `https://github.com/shea786/nvda-ask-gpt/releases/download/<tag_name>/`,
+`updater.py` only installs a release whose assets are under `https://github.com/shea786/nvda-ask-ai/releases/download/<tag_name>/`,
 whose `SHA256SUMS.txt` carries a valid Ed25519 signature (`SHA256SUMS.txt.sig`, verified by the pure-Python `ed25519.py` against the public
 key embedded in `updater.py`), whose file matches its checksum, and whose `manifest.ini` names `askAI` and the offered version. Downloads have
 a 120 s deadline and a 20 MB cap; the temporary folder is removed afterwards. See RELEASING.md for the signing key.

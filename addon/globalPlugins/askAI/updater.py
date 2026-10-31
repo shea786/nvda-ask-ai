@@ -31,7 +31,7 @@ try:
 except ImportError:  # Imported as a top-level module (unit tests, release tooling).
 	import ed25519
 
-REPO = "shea786/nvda-ask-gpt"
+REPO = "shea786/nvda-ask-ai"
 HOMEPAGE = "https://github.com/%s" % REPO
 LATEST_URL = "https://api.github.com/repos/%s/releases/latest" % REPO
 RELEASES_URL = "https://api.github.com/repos/%s/releases?per_page=20" % REPO
@@ -289,7 +289,7 @@ def parseReleases(dataList, addonName=ADDON_NAME):
 
 
 def releaseDownloadPrefix(tag):
-	"""https://github.com/shea786/nvda-ask-gpt/releases/download/<tag>/ with the tag URL-quoted."""
+	"""https://github.com/shea786/nvda-ask-ai/releases/download/<tag>/ with the tag URL-quoted."""
 	return DOWNLOAD_PREFIX + urllib.parse.quote(tag or "", safe="") + "/"
 
 
