@@ -33,6 +33,18 @@ New in 1.2.0:
 * **Update check**: once a day (and with "Check for updates now" in the settings or NVDA menu, Tools, "Check for Ask AI updates")
   the add-on looks for a newer GitHub release, verifies its SHA-256 checksum and hands it to NVDA's own installer.
   Skipped for copies installed from the NVDA Add-on Store, which updates them itself.
+* **Search**: Ctrl+F / F3 / Shift+F3 in the Conversation box ("Match 2 of 5", "Wrapped to first match"), and a debounced
+  Search field in the conversation manager over titles and message text.
+* **Question recall and drafts**: Up/Down in an empty Question box recall this conversation's questions, then the global
+  history (last 100, `%LOCALAPPDATA%\askAI\history.json`); Ctrl+S saves a per-conversation draft (schema 3), restored on open.
+* **Status**: NVDA+Alt+Shift+S reports "Claude is answering in <title>, 40 seconds.", "Dictating.", "Waiting for sign-in.",
+  "Not signed in to Claude" or "Idle. Last answer from ChatGPT at 3:05 PM in <title>."; answers that finish while another app
+  is in front are announced as "Done: <title>." / "Failed: <title>. <reason>" (setting, on by default).
+* **Ask about this**: NVDA+Alt+A attaches the selected text (or the navigator object's text, up to 20,000 characters) with the
+  app and window names, and optionally a GDI screenshot of the window (PNG written by the add-on's own zlib encoder).
+  Protected/password fields are refused.
+* **Attach files**: images (as images), UTF-8 text (inlined, 200 KB each / 500 KB total), other files up to 25 MB (copied
+  to a private per-request folder the AI may read). Questions over 32,000 characters become `question.txt`.
 * API keys in the environment (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`) are never passed
   to the programs, so usage always goes to your subscription.
 
@@ -55,6 +67,13 @@ addon/globalPlugins/askAI/providers/claude.py      Pure: Claude through `claude 
 addon/globalPlugins/askAI/providers/modelCatalog.py Pure: model lists (Codex's models_cache.json) and chooser helpers
 addon/globalPlugins/askAI/conversations.py         Pure: Conversation and ConversationStore (JSON files, atomic writes, schema 2)
 addon/globalPlugins/askAI/migration.py             Pure: copying Ask GPT 1.x settings and conversations, finding the old add-on
+addon/globalPlugins/askAI/search.py                Pure: case-insensitive matches, wrap-around, edit-control positions, conversation filter
+addon/globalPlugins/askAI/history.py               Pure: global question history (JSON in the data folder) and Up/Down recall
+addon/globalPlugins/askAI/status.py                Pure: status report sentence, "Done:" / "Failed:" phrases (templates translated by the UI)
+addon/globalPlugins/askAI/context.py               Pure: "Ask about this" capture with injected NVDA accessors, protected-field refusal
+addon/globalPlugins/askAI/attachments.py           Pure: attachment classification and limits, prompt fencing, per-request folders
+addon/globalPlugins/askAI/png.py                   Pure: minimal PNG encoder (zlib + struct)
+addon/globalPlugins/askAI/screenshot.py            ctypes GDI window capture (Windows only, lazy, full prototypes)
 addon/globalPlugins/askAI/updater.py               Pure: GitHub release check, version rules, checksum-verified download
 addon/globalPlugins/askAI/dictation.py             Pure: mute/restore state machine for dictation (speech module injected)
 addon/globalPlugins/askAI/exporters.py             Pure: .docx, .pdf, .txt, .html and .md writers, safe file names
@@ -138,6 +157,24 @@ or the private work folder. Verified against Claude Code 2.1.314 (`claude --help
 the file tools listed above, confined by Claude Code to the project folder, and has no command or web tools. Claude can therefore only make
 text-based files (for example Markdown, HTML, CSV); for Word or PDF the user saves the answer with "Save answer as".
 
+### Attachments, screen text and screenshots
+
+Everything attached goes with one question and is then cleared. The prompt (stdin) gets, before the question, a note that the
+following blocks are data and not instructions, then fenced blocks: the screen text labelled "Text from the user's screen (<app>,
+<window>)" and each inlined text file. The fence is a run of backticks longer than any run inside the content, so it cannot be closed
+from inside. Images, the screenshot and non-text files are written to `%LOCALAPPDATA%\askAI\workdir\requests\request-XXXX`, which is
+deleted when the request ends (and at startup if older than an hour):
+
+* Codex: each image is passed as `--image=<path>` (`codex exec --help`: `-i, --image <FILE>...  Optional image(s) to attach to the
+  initial prompt`), placed before `-o` so the multi-value option cannot take the trailing `-`. Other files are named in the prompt.
+* Claude Code has no option for local images (`--file` takes Files API ids), but its Read tool "returns PNG, JPEG, GIF, and WebP files as
+  visual content that Claude can see" (tools reference). So without a project folder the request folder is the working directory and
+  `--tools Read`; with a project folder it is added with `--add-dir <folder>` (help: "Additional directories to allow tool access to";
+  `--restricted` "confines the file tools to the working directories (--add-dir included)"), and the project's tool set already has Read.
+
+Only paths in the add-on's private folder reach the command line (file names are made safe for cmd.exe quoting); user text never does.
+The stored message keeps the attachment names and the context summary, never their content.
+
 ### Shared process handling
 
 * The working directory is the project folder, or an empty private folder, `%LOCALAPPDATA%\askAI\workdir` (or the temp folder).
@@ -181,6 +218,21 @@ WINEPREFIX=... OUT=... bash tools/wine-smoke/run.sh   # optional: real NVDA unde
 ```
 
 Releases: see [RELEASING.md](RELEASING.md).
+
+### Keyboard shortcuts
+
+| Keys | Where | Action |
+| - | - | - |
+| NVDA+Alt+G | anywhere | Open the Ask AI dialog |
+| NVDA+Alt+Shift+G | anywhere | Repeat the last answer (twice: show it in a window) |
+| NVDA+Alt+Shift+S | anywhere | Report Ask AI status |
+| NVDA+Alt+A | anywhere | Ask about this (attach selected/current text) |
+| Up / Down | empty Question box | Earlier / later questions |
+| Ctrl+S | Ask dialog | Save the draft |
+| Ctrl+F, F3, Shift+F3 | Ask dialog | Find, next match, previous match |
+
+NVDA+Alt+Shift+S and NVDA+Alt+A are not used by NVDA itself: checked in `source/globalCommands.py` of NVDA 2024.1, 2025.1, 2025.3
+and master, the whole `source/` tree of 2024.1 and master, and the 2024.1 and master user guides. (NVDA+Alt+S is taken in 2025.1+.)
 
 Code follows NVDA conventions: tabs, camelCase, `addonHandler.initTranslation()`, and user-visible strings in `_()` with
 `# Translators:` comments. The pure modules must not import NVDA modules, so they stay testable.

@@ -105,6 +105,36 @@ Other features
   updates now" button (Alt+U) in the settings. Without a newer version it
   says "Ask AI 1.2.0 is the latest version."
 
+Search, history, drafts, status, "Ask about this" and files
+----------------------------------------------------------
+- Ctrl+F in the Ask AI dialog finds text in the conversation ("Match 2 of
+  5" and the line); F3 / Shift+F3 go to the next / previous match.
+- In the conversation manager (Alt+R), type in Search (Alt+S) to filter
+  all conversations; NVDA says how many match.
+- In an empty Question box, Up and Down bring back earlier questions.
+- Ctrl+S saves what you typed as a draft; it comes back when you open the
+  conversation again ("Draft restored").
+- NVDA+Alt+Shift+S anywhere says what Ask AI is doing.
+- If an answer arrives while you are in another program, NVDA says
+  "Done:" and the conversation name before it.
+- NVDA+Alt+A in another program (with text selected, or on any control)
+  attaches that text to your next question. The Ask AI dialog shows a
+  Context field; "Include a screenshot of the window" (Alt+U) also sends a
+  picture of that window. Password fields are refused.
+- Attach files (Alt+H) adds files to the next question; they are listed
+  under Pending attachments (Alt+P); Remove file is Alt+I.
+
+Keyboard shortcuts
+------------------
+NVDA+Alt+G          Open Ask AI (anywhere)
+NVDA+Alt+Shift+G    Repeat the last answer; twice: show it in a window
+NVDA+Alt+Shift+S    Report Ask AI status
+NVDA+Alt+A          Ask about this (selected or current text)
+Up / Down           Earlier / later questions (empty Question box)
+Ctrl+S              Save draft          Ctrl+F    Find in conversation
+F3 / Shift+F3       Next / previous match
+Escape              Stop dictating, cancel the question, or close
+
 What to report back
 -------------------
 Please send back answers to these, even if everything worked:
@@ -128,7 +158,12 @@ Please send back answers to these, even if everything worked:
     NVDA tell you its name? Which Windows version (e.g. 11 24H2) do you have?
 11. Did a usage limit or sign-in problem give a clear message naming the
     right service?
-12. Anything confusing, silent, or spoken twice.
+12. Did Ctrl+F, F3, the conversation Search field, Up/Down recall, drafts
+    and NVDA+Alt+Shift+S work and speak clearly?
+13. Did NVDA+Alt+A attach the right text (from which program)? Did the
+    screenshot option work, and did the AI describe the picture?
+14. Did attaching a document, a picture and a big file work?
+15. Anything confusing, silent, or spoken twice.
 If something goes wrong, open the NVDA menu, Tools, View log, and send the
 lines that mention Ask AI (or the whole log).
 

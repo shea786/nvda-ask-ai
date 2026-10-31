@@ -32,6 +32,7 @@ FAKE_DIR = "C:\\fakecodex"
 FAKE_CODEX = FAKE_DIR + "\\codex.cmd"
 FAKE_CLAUDE_DIR = "C:\\fakeclaude"
 FAKE_CLAUDE = FAKE_CLAUDE_DIR + "\\claude.cmd"
+FILES = "C:\\smokefiles"
 CLAUDE_ANSWER_SPOKEN = "Bonjour from Claude."
 MIGRATED_ID = "0123456789abcdef0123456789abcdef"
 START_DELAY_MS = 5000
@@ -242,7 +243,10 @@ class FakeDirDialog:
 
 
 class FakeFileDialog(FakeDirDialog):
-	pass
+	paths = []
+
+	def GetPaths(self):
+		return list(self.paths)
 
 
 def findSettingsDialog():
@@ -724,6 +728,321 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		report(providersModule.isKnown("claude"), "providers registry knows Claude")
 		yield 300
 
+	def _combo(self, key, modifiers, effect, fallback, name):
+		"""Press a key combination with SendInput; if it has no effect, run fallback via wx.CallAfter."""
+		self.sim.Char(key, modifiers)
+		ok = yield from self._waitFor(effect, 2500)
+		if ok:
+			info("%s delivered by SendInput" % name)
+			return "SendInput"
+		info("%s not seen after SendInput; calling the handler" % name)
+		wx.CallAfter(fallback)
+		yield from self._waitFor(effect, 3000)
+		return "handler"
+
+	def _find(self, dialog, query):
+		"""Ctrl+F, type query into the real find prompt, OK."""
+		yield from self._combo(ord("F"), wx.MOD_CONTROL, lambda: findTopLevelOfType("TextEntryDialog", "Find"), dialog.onFind, "Ctrl+F")
+		prompt = yield from self._waitFor(lambda: findTopLevelOfType("TextEntryDialog", "Find"), 3000)
+		if prompt is None:
+			return None
+		prefilled = prompt.GetValue()
+		prompt.SetValue(query)
+		prompt.EndModal(wx.ID_OK)
+		return prefilled
+
+	def _round6(self, dialogs, store, part="all"):
+		"""Search, question recall, drafts, status ("a"); "Ask about this", attachments, long pastes and the
+		manager's Search field ("b"); or both ("all")."""
+		import subprocess
+
+		phase("round6")
+		yield from self._gesture(keyboardHandler.KeyboardInputGesture.fromName("NVDA+alt+g"))
+		dialog = yield from self._waitFor(dialogs.AskAIDialog.getInstance, 5000)
+		if not report(dialog is not None, "Ask dialog opened for the round 6 steps"):
+			return
+		yield 800
+		conversation = dialogs.state.current
+		yield from self._ask(dialog, dialogs, "What is the capital of France?")
+		yield from self._ask(dialog, dialogs, "Tell me about the capital again")
+		title = conversation.title
+		if part in ("all", "a"):
+			yield from self._round6a(dialogs, store, dialog, conversation, title)
+		if part in ("all", "b"):
+			yield from self._round6b(dialogs, store, title)
+		if part in ("all", "c"):
+			yield from self._round6c(dialogs, store, title)
+
+	def _round6a(self, dialogs, store, dialog, conversation, title):
+		# 1. Find in the Conversation box (two answers mention Paris).
+		spoken.clear()
+		yield from self._find(dialog, "PARIS")
+		yield from self._waitFor(lambda: any(str(x).startswith("Match ") for x in spoken), 3000)
+		ctrl = dialog.conversationCtrl
+		selected = ctrl.GetStringSelection()
+		report(any(str(x).startswith("Match 1 of 2. ChatGPT: Paris is the capital of France.") for x in spoken),
+			"Ctrl+F finds the first match and says Match 1 of 2 with the line", repr(spoken))
+		report(wx.Window.FindFocus() is ctrl and selected.lower() == "paris", "the match is selected in the focused Conversation box",
+			repr(selected))
+		spoken.clear()
+		yield from self._combo(wx.WXK_F3, wx.MOD_NONE, lambda: any("Match 2 of 2" in str(x) for x in spoken),
+			lambda: dialog.findNext(True), "F3")
+		report(any(str(x).startswith("Match 2 of 2.") for x in spoken), "F3 goes to the next match", repr(spoken))
+		spoken.clear()
+		yield from self._combo(wx.WXK_F3, wx.MOD_NONE, lambda: any("Wrapped" in str(x) for x in spoken),
+			lambda: dialog.findNext(True), "F3 (wrap)")
+		report(any(str(x).startswith("Wrapped to first match. Match 1 of 2.") for x in spoken), "F3 wraps to the first match", repr(spoken))
+		spoken.clear()
+		yield from self._combo(wx.WXK_F3, wx.MOD_SHIFT, lambda: any("Wrapped" in str(x) for x in spoken),
+			lambda: dialog.findNext(False), "Shift+F3")
+		report(any(str(x).startswith("Wrapped to last match. Match 2 of 2.") for x in spoken), "Shift+F3 wraps to the last match", repr(spoken))
+		spoken.clear()
+		prefilled = yield from self._find(dialog, "zebra")
+		yield from self._waitFor(lambda: "No matches for zebra" in spoken, 3000)
+		report(prefilled == "PARIS" and "No matches for zebra" in spoken, "Ctrl+F is prefilled with the last search; no match is announced",
+			repr((prefilled, spoken)))
+
+		# 2. Question recall with Up and Down, and drafts.
+		dialog.questionCtrl.SetValue("")
+		dialog.questionCtrl.SetFocus()
+		yield 300
+		spoken.clear()
+		yield from self._combo(wx.WXK_UP, wx.MOD_NONE, lambda: dialog.questionCtrl.GetValue(), lambda: dialog.recallQuestion(True), "Up")
+		report(dialog.questionCtrl.GetValue() == "Tell me about the capital again" and "Tell me about the capital again" in spoken,
+			"Up recalls and reads the newest question", repr(dialog.questionCtrl.GetValue()))
+		yield from self._combo(wx.WXK_UP, wx.MOD_NONE, lambda: dialog.questionCtrl.GetValue() == "What is the capital of France?",
+			lambda: dialog.recallQuestion(True), "Up again")
+		report(dialog.questionCtrl.GetValue() == "What is the capital of France?", "Up again recalls the earlier question")
+		spoken.clear()
+		yield from self._combo(wx.WXK_DOWN, wx.MOD_NONE, lambda: dialog.questionCtrl.GetValue() == "Tell me about the capital again",
+			lambda: dialog.recallQuestion(False), "Down")
+		yield from self._combo(wx.WXK_DOWN, wx.MOD_NONE, lambda: "No later question" in spoken, lambda: dialog.recallQuestion(False), "Down again")
+		report("No later question" in spoken and dialog.questionCtrl.GetValue() == "", "Down past the newest says No later question and restores the box",
+			repr(spoken))
+		dialog.questionCtrl.SetValue("half-written draft")
+		dialog.questionCtrl.SetInsertionPointEnd()
+		dialog.questionCtrl.SetFocus()
+		yield 300
+		spoken.clear()
+		yield from self._combo(ord("S"), wx.MOD_CONTROL, lambda: "Draft saved" in spoken, lambda: dialog.saveDraft(), "Ctrl+S")
+		report("Draft saved" in spoken and store.load(conversation.id).draft == "half-written draft", "Ctrl+S saves the draft in the JSON",
+			repr(spoken))
+		press(dialog.FindWindowById(wx.ID_CLOSE))
+		yield from self._waitFor(lambda: dialogs.AskAIDialog.getInstance() is None, 3000)
+		spoken.clear()
+		yield from self._gesture(keyboardHandler.KeyboardInputGesture.fromName("NVDA+alt+g"))
+		dialog = yield from self._waitFor(dialogs.AskAIDialog.getInstance, 5000)
+		yield from self._waitFor(lambda: "Draft restored" in spoken, 3000)
+		report(dialog is not None and dialog.questionCtrl.GetValue() == "half-written draft" and "Draft restored" in spoken,
+			"reopening restores the draft and says Draft restored", repr(spoken))
+		if dialog is None:
+			return
+		yield 500
+
+		# 3. Status report, and "Done:" when the answer arrives with the dialog closed.
+		dialog.questionCtrl.SetValue("MEDIUM status question")
+		dialog.questionCtrl.SetFocus()
+		self.sim.Char(wx.WXK_RETURN)
+		yield from self._waitFor(lambda: dialogs.state.pending is not None, 3000)
+		report(store.load(conversation.id).draft == "", "sending clears the draft")
+		statusGesture = keyboardHandler.KeyboardInputGesture.fromName("NVDA+alt+shift+s")
+		report(getattr(scriptHandler.findScript(statusGesture), "__name__", "") == "script_reportStatus",
+			"NVDA+Alt+Shift+S resolves to script_reportStatus")
+		spoken.clear()
+		yield from self._gesture(statusGesture)
+		yield from self._waitFor(lambda: any("is answering in" in str(x) for x in spoken), 3000)
+		report(any(str(x).startswith("ChatGPT is answering in %s, " % title) for x in spoken), "status while answering", repr(spoken))
+		spoken.clear()
+		press(dialog.FindWindowById(wx.ID_CLOSE))
+		yield from self._waitFor(lambda: any(str(x).startswith("Done: ") for x in spoken), 15000)
+		report(any(str(x) == "Done: %s. Paris is the capital of France." % title for x in spoken),
+			"an answer arriving with the dialog closed starts with Done: <title>.", repr(spoken))
+		spoken.clear()
+		yield from self._gesture(statusGesture)
+		yield from self._waitFor(lambda: spoken, 3000)
+		report(any(str(x).startswith("Idle. Last answer from ChatGPT at ") and str(x).endswith(" in %s." % title) for x in spoken),
+			"status when idle names the last answer", repr(spoken))
+
+	def _round6b(self, dialogs, store, title):
+		dialog = dialogs.AskAIDialog.getInstance()
+		if dialog is not None:
+			press(dialog.FindWindowById(wx.ID_CLOSE))
+			yield from self._waitFor(lambda: dialogs.AskAIDialog.getInstance() is None, 3000)
+
+		# 4. "Ask about this" in Notepad, with a screenshot.
+		aboutGesture = keyboardHandler.KeyboardInputGesture.fromName("NVDA+alt+a")
+		report(getattr(scriptHandler.findScript(aboutGesture), "__name__", "") == "script_askAboutThis",
+			"NVDA+Alt+A resolves to script_askAboutThis")
+		# Wine without a window manager does not bring another process (Notepad) to the foreground, so the
+		# "other app" is an editor window in NVDA's own process: a standard multi-line edit control.
+		editorFrame = wx.Frame(None, title="Report.txt - Smoke editor", size=(500, 300))
+		editor = wx.TextCtrl(editorFrame, style=wx.TE_MULTILINE)
+		with open(FILES + "\\context.txt", encoding="utf-8") as f:
+			editor.SetValue(f.read())
+		editorFrame.Show()
+		editorFrame.Raise()
+		editor.SetFocus()
+		editor.SetSelection(-1, -1)
+		try:
+			ready = yield from self._waitFor(lambda: api.getFocusObject().windowHandle == editor.GetHandle(), 8000)
+			report(bool(ready), "the editor window has the NVDA focus", repr(api.getForegroundObject().name))
+			yield 800
+			spoken.clear()
+			yield from self._gesture(aboutGesture)
+			dialog = yield from self._waitFor(dialogs.AskAIDialog.getInstance, 8000)
+			yield from self._waitFor(lambda: any("Context attached from" in str(x) for x in spoken), 5000)
+		except BaseException:
+			editorFrame.Destroy()
+			raise
+		if not report(dialog is not None, "NVDA+Alt+A opens the Ask dialog", repr(spoken)):
+			return
+		yield 500
+		phase("ask-about-this")
+		summary = dialog.contextCtrl.GetValue()
+		report(dialogs.state.pendingContext is not None and "Quarterly figures" in dialogs.state.pendingContext.text,
+			"the editor's selected text is attached", repr(dialogs.state.pendingContext.text[:80] if dialogs.state.pendingContext else None))
+		report(" characters from " in summary and dialog.contextCtrl.IsShown() and dialog.contextCtrl.AcceptsFocusFromKeyboard(),
+			"Context field shows the summary and is Tab-reachable", repr(summary))
+		report(any(str(x).startswith("Context attached from ") and str(x).endswith("Type your question.") for x in spoken),
+			"attaching context is announced", repr(spoken))
+		report(wx.Window.FindFocus() is dialog.questionCtrl, "focus is in the Question box after NVDA+Alt+A")
+		hasShot = dialog.screenshotCheck.IsEnabled()
+		info("screenshot captured under Wine: %s" % hasShot)
+		if hasShot:
+			dialog.screenshotCheck.SetValue(True)
+			event = wx.CommandEvent(wx.wxEVT_CHECKBOX, dialog.screenshotCheck.GetId())
+			event.SetEventObject(dialog.screenshotCheck)
+			dialog.screenshotCheck.GetEventHandler().ProcessEvent(event)
+		yield from self._ask(dialog, dialogs, "Summarize this")
+		editorFrame.Destroy()
+		calls = readFake("calls.log")
+		lastCall = calls[calls.rfind('ARGS: "exec"'):]
+		stdin = readFake("last-stdin.txt")
+		report("Text from the user's screen" in stdin and "Quarterly figures: revenue 42 million." in stdin,
+			"the screen text is fenced in the prompt (stdin)", repr(stdin[:300]))
+		if hasShot:
+			report('"--image=' in lastCall and "screenshot.png" in lastCall and "Quarterly" not in lastCall,
+				"Codex gets the screenshot with --image=, never the text on argv", repr(lastCall[:500]))
+		saved = store.load(dialogs.state.current.id)
+		question = [m for m in saved.messages if m.get("role") == "user"][-1]
+		report(" characters from " in question.get("context", "") and "Quarterly" not in str(saved.toDict()),
+			"the stored question keeps the summary, not the screen text", repr(question))
+		requests = os.path.join(dialogs.workDir, "requests")
+		report(not os.path.isdir(requests) or not os.listdir(requests), "the request folder was deleted",
+			repr(os.listdir(requests) if os.path.isdir(requests) else None))
+		report(not dialog.contextCtrl.IsShown(), "the context applies to one question only")
+
+		# A password field is refused.
+		frame = wx.Frame(None, title="Smoke password")
+		password = wx.TextCtrl(frame, style=wx.TE_PASSWORD)
+		frame.Show()
+		password.SetFocus()
+		yield from self._waitFor(lambda: api.getFocusObject().windowHandle == password.GetHandle(), 5000)
+		yield 500
+		spoken.clear()
+		yield from self._gesture(aboutGesture)
+		yield from self._waitFor(lambda: spoken, 3000)
+		report("Can't use protected or password fields" in spoken, "NVDA+Alt+A refuses a password field",
+			repr((spoken, api.getFocusObject().role)))
+		frame.Destroy()
+		yield 500
+
+	def _round6c(self, dialogs, store, title):
+		dialog = dialogs.AskAIDialog.getInstance()
+		if dialog is None:
+			yield from self._gesture(keyboardHandler.KeyboardInputGesture.fromName("NVDA+alt+g"))
+			dialog = yield from self._waitFor(dialogs.AskAIDialog.getInstance, 5000)
+		dialog.Raise()
+		yield 500
+
+		# 5. Attach files (Codex: picture as --image, text inlined, other file copied).
+		FakeFileDialog.paths = [FILES + "\\notes.txt", FILES + "\\pic.png", FILES + "\\data.bin"]
+		original = wx.FileDialog
+		wx.FileDialog = FakeFileDialog
+		spoken.clear()
+		try:
+			press(dialog.attachButton)
+			yield from self._waitFor(lambda: "3 files attached" in spoken, 5000)
+		finally:
+			wx.FileDialog = original
+		items = [dialog.attachmentsList.GetString(i) for i in range(dialog.attachmentsList.GetCount())]
+		report("3 files attached" in spoken and len(items) == 3 and wx.Window.FindFocus() is dialog.attachmentsList,
+			"Attach files lists the files and announces them", repr((spoken, items)))
+		phase("attachments")
+		yield 300
+		yield from self._ask(dialog, dialogs, "Use the attached files")
+		calls = readFake("calls.log")
+		lastCall = calls[calls.rfind('ARGS: "exec"'):]
+		stdin = readFake("last-stdin.txt")
+		report('"--image=' in lastCall and "pic.png" in lastCall, "the picture goes to Codex with --image=", repr(lastCall[:400]))
+		report("Attached file notes.txt:" in stdin and "Buy milk and bread." in stdin and "data.bin" in stdin,
+			"text file inlined, other file named in the prompt", repr(stdin[:400]))
+		saved = store.load(dialogs.state.current.id)
+		question = [m for m in saved.messages if m.get("role") == "user"][-1]
+		report(question.get("attachments") == ["notes.txt", "pic.png", "data.bin"], "attachment names stored with the question", repr(question))
+
+		# Claude: the picture is opened with Read from the request folder (its working directory).
+		choose(dialog.serviceChoice, 1)
+		yield 300
+		FakeFileDialog.paths = [FILES + "\\pic.png"]
+		wx.FileDialog = FakeFileDialog
+		try:
+			press(dialog.attachButton)
+			yield from self._waitFor(lambda: dialog.attachmentsList.GetCount() == 1, 5000)
+		finally:
+			wx.FileDialog = original
+		yield from self._ask(dialog, dialogs, "Describe the picture")
+		calls = readFake("calls.log", FAKE_CLAUDE_DIR)
+		lastCall = calls[calls.rfind('ARGS: "-p"'):]
+		report('"--tools" "Read" ' in lastCall and "\\requests\\request-" in lastCall.split("CWD:")[-1],
+			"Claude gets only Read and runs in the request folder", repr(lastCall[:600]))
+		choose(dialog.serviceChoice, 0)
+		yield 300
+
+		# Long paste becomes question.txt.
+		spoken.clear()
+		yield from self._ask(dialog, dialogs, "long " * 7000)
+		stdin = readFake("last-stdin.txt")
+		report("Long text attached as a file" in spoken and "Attached file question.txt:" in stdin, "a long paste is sent as question.txt",
+			repr(spoken))
+
+		# 6. Search all conversations in the manager.
+		press(findButton(dialog, "Conve&rsations..."))
+		manager = yield from self._waitFor(lambda: findTopLevelOfType("ConversationManagerDialog"), 5000)
+		if report(manager is not None, "conversation manager opened for Search"):
+			yield 800
+			mnemonicsFound = mnemonics(manager)
+			report(not {k: v for k, v in mnemonicsFound.items() if len(v) > 1} and "s" in mnemonicsFound,
+				"manager mnemonics unique, Search has S", repr(mnemonicsFound))
+			spoken.clear()
+			manager.searchCtrl.SetFocus()
+			manager.searchCtrl.SetValue("WHAT IS THE CAPITAL")
+			yield from self._waitFor(lambda: any("match" in str(x) for x in spoken), 3000)
+			rows = [manager.listCtrl.GetItemText(i) for i in range(manager.listCtrl.GetItemCount())]
+			report(any(str(x).endswith(("conversation matches", "conversations match")) for x in spoken) and title in rows,
+				"Search filters by title (case-insensitive) and announces the count", repr((spoken, rows)))
+			spoken.clear()
+			manager.searchCtrl.SetValue("CAPITAL AGAIN")
+			yield from self._waitFor(lambda: any("match" in str(x) for x in spoken), 3000)
+			rows = [manager.listCtrl.GetItemText(i) for i in range(manager.listCtrl.GetItemCount())]
+			report("1 conversation matches" in spoken and rows == [title], "Search finds message text", repr((spoken, rows)))
+			spoken.clear()
+			manager.searchCtrl.SetValue("revenue 42")
+			yield from self._waitFor(lambda: any("match" in str(x) for x in spoken), 3000)
+			report("0 conversations match" in spoken, "screen text is not stored, so it is not found", repr(spoken))
+			spoken.clear()
+			manager.searchCtrl.SetValue("zzzz nothing")
+			yield from self._waitFor(lambda: any("match" in str(x) for x in spoken), 3000)
+			report("0 conversations match" in spoken and manager.listCtrl.GetItemCount() == 0 and manager.emptyText.IsShown()
+				and wx.Window.FindFocus() is manager.searchCtrl, "no match: empty list, message shown, focus stays in Search", repr(spoken))
+			phase("manager-search")
+			yield 300
+			press(manager.FindWindow(wx.ID_CLOSE))
+			yield from self._waitFor(lambda: findTopLevelOfType("ConversationManagerDialog") is None, 3000)
+		press(dialog.FindWindowById(wx.ID_CLOSE))
+		yield from self._waitFor(lambda: dialogs.AskAIDialog.getInstance() is None, 3000)
+		yield 300
+
 	def _run(self):
 		info("NVDA %s, Python %s, %d-bit, configPath=%s" % (
 			buildVersion.version, sys.version.split()[0], 64 if sys.maxsize > 2 ** 32 else 32,
@@ -799,11 +1118,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		# ASKAI_SMOKE_ONLY=new: skip the Ask GPT 1.1 steps (2 to 8) and go straight to the Claude steps, then the
 		# settings and the exit checks. Fewer child processes before the new features are reached, because Wine 10's
 		# wineserver can crash (queue.c add_queue_hook_count assertion) after many short-lived hooked processes.
-		focused = os.environ.get("ASKAI_SMOKE_ONLY", "").lower() == "new"
+		only = os.environ.get("ASKAI_SMOKE_ONLY", "").lower()
+		focused = only in ("new", "round6", "round6a", "round6b", "round6c")
 		cancelledAt = time.monotonic() - 60
 		if focused:
-			info("focused run: Ask AI 1.2 steps only")
-			yield from self._claude(dialogs, store)
+			info("focused run: %s" % only)
+			if only == "new":
+				yield from self._claude(dialogs, store)
+			yield from self._round6(dialogs, store, {"round6a": "a", "round6b": "b", "round6c": "c"}.get(only, "all"))
 		else:
 			# 2. Open the Ask dialog through the real gesture binding.
 			gesture = keyboardHandler.KeyboardInputGesture.fromName("NVDA+alt+g")
@@ -1119,11 +1441,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 				closed = yield from self._waitFor(lambda: dialogs.AskAIDialog.getInstance() is None, 3000)
 				report(bool(closed) and dialogs.state.pending is not None, "Close button closes the dialog while the request runs")
 				report("ChatGPT will speak the answer when it's ready." in spoken, "closing while waiting is announced", repr(spoken))
-				heard = yield from self._waitFor(lambda: ANSWER_SPOKEN in spoken, 20000)
-				report(bool(heard), "answer spoken after the dialog was closed", repr(spoken))
+				# With "Announce when answers finish while working in other apps" (on by default) it starts with "Done: <title>.".
+				heard = yield from self._waitFor(lambda: any(str(x).endswith(ANSWER_SPOKEN) for x in spoken), 20000)
+				report(bool(heard) and any(str(x) == "Done: MEDIUM question. " + ANSWER_SPOKEN for x in spoken),
+					"answer spoken after the dialog was closed, after Done: <title>.", repr(spoken))
 				mediumId = dialogs.state.current.id
 				yield from self._newFeatures(dialogs, store, firstId, mediumId)
 				yield from self._claude(dialogs, store)
+				yield from self._round6(dialogs, store)
 
 		# 9. NVDA Settings, Ask AI panel.
 		spoken.clear()

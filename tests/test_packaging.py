@@ -53,6 +53,13 @@ class TestCompile(unittest.TestCase):
 			"folderSnapshot.py",
 			"migration.py",
 			"updater.py",
+			"search.py",
+			"history.py",
+			"status.py",
+			"context.py",
+			"png.py",
+			"attachments.py",
+			"screenshot.py",
 		):
 			with open(os.path.join(helpers.PACKAGE_DIR, name), encoding="utf-8") as f:
 				source = f.read()
@@ -95,6 +102,17 @@ class TestUserDocs(unittest.TestCase):
 			"Add-on Store",
 			"GNU General Public License version 2",
 			"%LOCALAPPDATA%\\askAI\\conversations",
+			# Round 6: shortcuts table and the new features.
+			"<h2>Keyboard shortcuts</h2>",
+			"NVDA+Alt+Shift+S",
+			"NVDA+Alt+A",
+			"Ctrl+F",
+			"Shift+F3",
+			"Ctrl+S",
+			"Can't use protected or password fields",
+			"Include a screenshot of the window",
+			"Long text attached as a file",
+			"history.json",
 		):
 			self.assertIn(required, html)
 		self.assertNotIn("askGPT-1.1.0", html)
@@ -168,6 +186,13 @@ class TestBuild(unittest.TestCase):
 			"exporters",
 			"folderSnapshot",
 			"migration",
+			"search",
+			"history",
+			"status",
+			"context",
+			"png",
+			"attachments",
+			"screenshot",
 			"textUtils",
 			"updateCheck",
 			"updater",

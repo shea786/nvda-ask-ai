@@ -47,11 +47,11 @@ Its fields (from `.github/ISSUE_TEMPLATE/registerAddon.yml` in nvaccess/addon-da
 | Download URL | `https://github.com/shea786/nvda-ask-gpt/releases/download/v<version>/askAI-<version>.nvda-addon` |
 | Source URL | `https://github.com/shea786/nvda-ask-gpt` |
 | Publisher | `Asif Ali` |
-| Channel | `stable` (use `beta` for prereleases such as `1.2.0-beta1`) |
+| Channel | `beta` (the channel chosen for the first submission, 1.2.0; use `stable` once the add-on has been through beta) |
 | License Name | `GPL v2` |
 | License URL | `https://www.gnu.org/licenses/old-licenses/gpl-2.0.html` (the form's prefilled `https://www.gnu.org/licenses/gpl-2.0.html` is also fine) |
 
-For 1.2.0 the Download URL is
+For 1.2.0 (first submission, **beta** channel) the Download URL is
 `https://github.com/shea786/nvda-ask-gpt/releases/download/v1.2.0/askAI-1.2.0.nvda-addon`.
 The Download URL must start with `https`, end with `nvda-addon` and always serve the same file, so never replace
 a release asset after submitting it; release a new version instead.

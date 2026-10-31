@@ -11,8 +11,12 @@ import tempfile
 import time
 import uuid
 
-# 1: Ask GPT 1.1 (Codex only). 2: Ask AI 1.2 adds "provider" (and "provider" on assistant messages).
-SCHEMA_VERSION = 2
+# 1: Ask GPT 1.1 (Codex only). 2: adds "provider" (and "provider" on assistant messages).
+# 3: adds "draft" (the unsent Question text) and, on questions, "attachments" (file names) and "context"
+# (a summary of attached screen text). Older files load with an empty draft and no metadata.
+SCHEMA_VERSION = 3
+# Metadata keys a message may carry, with their types.
+MESSAGE_METADATA = {"attachments": list, "context": str}
 # Conversations saved before services existed were all answered by Codex (ChatGPT).
 LEGACY_PROVIDER = "codex"
 FILE_SUFFIX = ".json"
@@ -65,6 +69,7 @@ class Conversation:
 		messages=None,
 		titleIsCustom=False,
 		provider=LEGACY_PROVIDER,
+		draft="",
 	):
 		now = time.time()
 		self.id = id or uuid.uuid4().hex
@@ -79,17 +84,23 @@ class Conversation:
 		self.titleIsCustom = bool(titleIsCustom)
 		# The AI service ("codex", "claude") this conversation asks next.
 		self.provider = provider or LEGACY_PROVIDER
+		# Question text saved with Ctrl+S or when the dialog closes, restored when the conversation opens.
+		self.draft = draft or ""
 
 	# Messages
 
-	def addMessage(self, role, text, when=None, provider=None):
-		"""Add a message. Assistant messages record the service that wrote them (default: the conversation's)."""
+	def addMessage(self, role, text, when=None, provider=None, metadata=None):
+		"""Add a message. Assistant messages record the service that wrote them (default: the conversation's).
+		metadata (questions only): {"attachments": [names], "context": summary}; never file or screen content.
+		"""
 		if role not in ROLES:
 			raise ValueError("Unknown role %r" % role)
 		when = time.time() if when is None else when
 		message = {"role": role, "text": text or "", "time": when}
 		if role == ROLE_ASSISTANT:
 			message["provider"] = provider or self.provider
+		for key, value in _cleanMetadata(metadata).items():
+			message[key] = value
 		self.messages.append(message)
 		del self.messages[:-MAX_MESSAGES]
 		if role == ROLE_USER and not self.titleIsCustom and not self.title:
@@ -167,6 +178,11 @@ class Conversation:
 	def isEmpty(self):
 		return not self.messages
 
+	@property
+	def questions(self):
+		"""The questions asked in this conversation, oldest first."""
+		return [m.get("text", "") for m in self.messages if m.get("role") == ROLE_USER]
+
 	# Serialisation
 
 	def toDict(self):
@@ -182,6 +198,7 @@ class Conversation:
 			"model": self.model,
 			"reasoningEffort": self.reasoningEffort,
 			"provider": self.provider,
+			"draft": self.draft,
 			"messages": self.messages,
 		}
 
@@ -214,6 +231,7 @@ class Conversation:
 					"text": message["text"],
 					"time": float(when) if isinstance(when, (int, float)) else 0.0,
 				}
+				entry.update(_cleanMetadata(message))
 				if message["role"] == ROLE_ASSISTANT:
 					messageProvider = message.get("provider")
 					if not isinstance(messageProvider, str) or not _PROVIDER.match(messageProvider):
@@ -241,7 +259,22 @@ class Conversation:
 			messages=messages,
 			titleIsCustom=data.get("titleIsCustom") is True,
 			provider=provider,
+			draft=text("draft"),
 		)
+
+
+def _cleanMetadata(metadata):
+	"""Only the known metadata keys, with the right types (lists of strings, strings)."""
+	result = {}
+	for key, kind in MESSAGE_METADATA.items():
+		value = (metadata or {}).get(key)
+		if kind is list and isinstance(value, list):
+			names = [item for item in value if isinstance(item, str)]
+			if names:
+				result[key] = names
+		elif kind is str and isinstance(value, str) and value:
+			result[key] = value
+	return result
 
 
 def friendlyTime(timestamp, now=None, todayLabel="Today", yesterdayLabel="Yesterday"):

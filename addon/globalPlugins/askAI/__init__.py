@@ -17,7 +17,7 @@ from gui import settingsDialogs
 from logHandler import log
 from scriptHandler import script
 
-from . import conversations, dialogs, dictation, migration, providers, updateCheck
+from . import attachments, context, conversations, dialogs, dictation, migration, providers, updateCheck
 from .providers import base as providerBase
 
 addonHandler.initTranslation()
@@ -43,6 +43,8 @@ confspec = {
 	% (int(dictation.DEFAULT_SILENCE_TIMEOUT), dictation.MIN_SILENCE_TIMEOUT, dictation.MAX_SILENCE_TIMEOUT),
 	"timeout": "integer(default=%d, min=%d, max=%d)"
 	% (providerBase.DEFAULT_TIMEOUT, providerBase.MIN_TIMEOUT, providerBase.MAX_TIMEOUT),
+	# Say "Done: <title>." / "Failed: <title>. <reason>" when a question finishes while another app is in front.
+	"announceInOtherApps": "boolean(default=True)",
 	"autoUpdateCheck": "boolean(default=True)",
 	"lastUpdateCheck": "float(default=0.0)",
 	# Set once the Ask GPT 1.x settings and conversations were copied (or there were none).
@@ -148,6 +150,54 @@ def offerToRemoveOldAddon():
 		ui.message(_("Ask GPT will be removed when NVDA restarts."))
 
 
+def captureScreenContext():
+	"""Selected text of the focus, else the navigator object's text, with the app and window names and a
+	screenshot of the foreground window (only sent if the user ticks "Include a screenshot of the window").
+	@raise context.ContextError: for protected fields or when there is no text.
+	"""
+	import api
+	import controlTypes
+	import textInfos
+
+	focus = api.getFocusObject()
+	navigator = api.getNavigatorObject()
+
+	def selection(obj):
+		return obj.makeTextInfo(textInfos.POSITION_SELECTION).text
+
+	def allText(obj):
+		info = obj.makeTextInfo(textInfos.POSITION_ALL)
+		return info.text
+
+	def protected(obj):
+		return context.isProtectedObject(
+			obj,
+			passwordRole=getattr(controlTypes.Role, "PASSWORDEDIT", None),
+			protectedState=getattr(controlTypes.State, "PROTECTED", None),
+		)
+
+	appName = ""
+	try:
+		appModule = focus.appModule
+		appName = getattr(appModule, "productName", "") or appModule.appName
+	except Exception:
+		appName = ""
+	windowTitle = ""
+	try:
+		windowTitle = api.getForegroundObject().name or ""
+	except Exception:
+		windowTitle = ""
+	captured = context.captureContext(focus, navigator, selection, allText, appName, windowTitle, protected)
+	try:
+		from . import screenshot
+
+		captured.screenshot = screenshot.captureWindow()
+	except Exception:
+		log.debugWarning("Ask AI: could not capture a screenshot", exc_info=True)
+		captured.screenshot = None
+	return captured
+
+
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	scriptCategory = SCRIPT_CATEGORY
 
@@ -206,6 +256,7 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def _cleanWorkDir():
 		try:
 			providerBase.cleanStaleAnswerFiles(dialogs.workDir)
+			attachments.RequestFiles.cleanStale(dialogs.workDir)
 		except Exception:
 			log.debugWarning("Ask AI: could not clean the working folder", exc_info=True)
 
@@ -271,6 +322,51 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			ui.browseableMessage(dialogs.state.lastAnswer, _("Last answer"))
 		else:
 			ui.message(dialogs.state.lastAnswerSpoken)
+
+	@script(
+		# Translators: Description of the command that reports what Ask AI is doing.
+		description=_("Reports what Ask AI is doing: answering, dictating, waiting for sign-in or idle"),
+		category=SCRIPT_CATEGORY,
+		gesture="kb:NVDA+alt+shift+s",
+		speakOnDemand=True,
+	)
+	def script_reportStatus(self, gesture):
+		if globalVars.appArgs.secure:
+			return
+		try:
+			message = dialogs.currentStatus()
+		except Exception:
+			log.error("Ask AI: could not build the status", exc_info=True)
+			return
+		ui.message(message)
+
+	@script(
+		# Translators: Description of the command that attaches the selected or current text to a question.
+		description=_(
+			"Ask about this: attaches the selected text, or the text of the navigator object, to the next question"
+		),
+		category=SCRIPT_CATEGORY,
+		gesture="kb:NVDA+alt+a",
+	)
+	def script_askAboutThis(self, gesture):
+		if globalVars.appArgs.secure:
+			return
+		try:
+			screenContext = captureScreenContext()
+		except context.ContextError as e:
+			if e.reason == context.REASON_PROTECTED:
+				# Translators: Reported when "Ask about this" is used on a password or other protected field.
+				ui.message(_("Can't use protected or password fields"))
+			else:
+				# Translators: Reported when "Ask about this" finds no text to attach.
+				ui.message(_("No text here to ask about"))
+			return
+		except Exception:
+			log.error("Ask AI: could not capture the screen text", exc_info=True)
+			# Translators: Reported when the screen text could not be read.
+			ui.message(_("Could not read the text here"))
+			return
+		wx.CallAfter(dialogs.openAskDialogWithContext, screenContext)
 
 	def terminate(self):
 		try:

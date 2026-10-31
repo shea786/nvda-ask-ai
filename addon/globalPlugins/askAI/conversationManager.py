@@ -11,12 +11,14 @@ from gui import guiHelper
 from gui.dpiScalingHelper import DpiScalingHelperMixinWithoutInit
 from logHandler import log
 
-from . import conversations, dialogs, exporters, providers
+from . import conversations, dialogs, exporters, providers, search
 from .textUtils import stripMarkdown
 
 addonHandler.initTranslation()
 
 ANNOUNCE_DELAY_MS = 300
+# Filter the list this long after the last key press in the Search field.
+SEARCH_DEBOUNCE_MS = 300
 
 
 def conversationBlocks(conversation, raw=False):
@@ -42,15 +44,24 @@ def conversationBlocks(conversation, raw=False):
 
 
 class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
-	"""Lists saved conversations. Mnemonics: V H C R A D X I."""
+	"""Lists saved conversations. Mnemonics: S V H C R A D X I."""
 
 	def __init__(self, parent):
 		# Translators: Title of the conversation manager.
 		super().__init__(parent, title=_("Ask AI conversations"), style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
 		self.chosen = None
 		self._items = []
+		self._searchTimer = None
 		mainSizer = wx.BoxSizer(wx.VERTICAL)
 		sHelper = guiHelper.BoxSizerHelper(self, orientation=wx.VERTICAL)
+
+		self.searchCtrl = sHelper.addLabeledControl(
+			# Translators: Label of the field that filters the conversations by title and message text.
+			_("&Search:"),
+			wx.TextCtrl,
+			size=(self.scaleSize(300), -1),
+		)
+		self.searchCtrl.Bind(wx.EVT_TEXT, self.onSearchText)
 
 		self.listCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the list of saved conversations.
@@ -127,7 +138,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		if current is not None:
 			dialogs.state.save(current)
 		self.populate(current.id if current is not None else None)
-		self.listCtrl.SetFocus()
+		self._focusList()
 		count = len(self._items)
 		if count:
 			# Translators: Announced when the conversation manager opens. {count} is a number.
@@ -149,9 +160,35 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			return current
 		return conversation
 
+	@property
+	def query(self):
+		return self.searchCtrl.GetValue().strip()
+
+	def onSearchText(self, evt):
+		# Debounced: filter about 300 ms after the last key press.
+		if self._searchTimer is not None:
+			self._searchTimer.Stop()
+		self._searchTimer = wx.CallLater(SEARCH_DEBOUNCE_MS, self._applySearch)
+
+	def _applySearch(self):
+		self._searchTimer = None
+		if not self:
+			return
+		self.populate(self._selectedId())
+		count = len(self._items)
+		if self.query:
+			# Translators: Announced after filtering the conversations. {count} is a number.
+			message = ngettext("{count} conversation matches", "{count} conversations match", count).format(count=count)
+		else:
+			# Translators: Announced when the search field is emptied. {count} is a number.
+			message = ngettext("{count} conversation", "{count} conversations", count).format(count=count)
+		ui.message(message)
+
 	def populate(self, selectId=None, selectIndex=None):
 		includeArchived = self.archivedCheck.GetValue()
-		self._items = [self._resolve(c) for c in self.store.list(includeArchived=includeArchived)]
+		listed = self.store.list(includeArchived=includeArchived)
+		# Title and message text, across all (and with Show archived, archived) conversations.
+		self._items = [self._resolve(c) for c in search.filterConversations(listed, self.query)]
 		self.listCtrl.DeleteAllItems()
 		# Translators: Title shown for a conversation that has no title yet.
 		untitled = _("Untitled conversation")
@@ -177,6 +214,11 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			folder = conversation.projectFolder
 			self.listCtrl.SetItem(index, 3, os.path.basename(os.path.normpath(folder)) if folder else "")
 			self.listCtrl.SetItem(index, 4, providers.shortName(conversation.provider))
+		if self.query:
+			# Translators: Shown instead of the list when no conversation matches the search.
+			self.emptyText.SetLabel(_("No conversations match."))
+		else:
+			self.emptyText.SetLabel(_("No saved conversations yet."))
 		self.emptyText.Show(not self._items)
 		self.Layout()
 		if self._items:
@@ -189,6 +231,13 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			self.listCtrl.Focus(index)
 			self.listCtrl.EnsureVisible(index)
 		self._updateButtons()
+
+	def _focusList(self):
+		"""Focus the list, or the Search field when the (filtered) list is empty."""
+		if self._items:
+			self.listCtrl.SetFocus()
+		else:
+			self.searchCtrl.SetFocus()
 
 	def _selectedIndex(self):
 		return self.listCtrl.GetFirstSelected()
@@ -220,6 +269,9 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 
 	def onCharHook(self, evt):
 		if evt.GetKeyCode() == wx.WXK_ESCAPE:
+			if self._searchTimer is not None:
+				self._searchTimer.Stop()
+				self._searchTimer = None
 			self.EndModal(wx.ID_CANCEL)
 			return
 		evt.Skip()
@@ -260,7 +312,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		dialogs.state.save(conversation)
 		self.populate(conversation.id)
 		self._refreshAskDialog()
-		self.listCtrl.SetFocus()
+		self._focusList()
 
 	def onArchive(self, evt):
 		conversation = self._selected()
@@ -279,7 +331,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			self.populate(conversation.id)
 		else:
 			self.populate(selectIndex=index)
-		self.listCtrl.SetFocus()
+		self._focusList()
 		wx.CallLater(ANNOUNCE_DELAY_MS, ui.message, message)
 
 	def onDelete(self, evt):
@@ -305,7 +357,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			state.current = state.newConversation()
 			self._refreshAskDialog()
 		self.populate(selectIndex=index)
-		self.listCtrl.SetFocus()
+		self._focusList()
 		# Translators: Announced after deleting a conversation.
 		wx.CallLater(ANNOUNCE_DELAY_MS, ui.message, _("Deleted"))
 
@@ -351,7 +403,7 @@ class ConversationManagerDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			return
 		self.archivedCheck.SetValue(False)
 		self.populate(conversation.id)
-		self.listCtrl.SetFocus()
+		self._focusList()
 		# Translators: Announced after importing. {title} is the conversation title.
 		wx.CallLater(ANNOUNCE_DELAY_MS, ui.message, _("Imported {title}").format(title=conversation.title or _("Untitled conversation")))
 

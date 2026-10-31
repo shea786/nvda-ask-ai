@@ -166,21 +166,26 @@ def findClaude(userPath="", env=None, which=base.shutil.which, isFile=os.path.is
 	return base.findExecutable("claude", candidatePaths(env, isWindows), userPath, which, isFile, isWindows)
 
 
-def toolsFor(projectFolder, allowWrites):
+def toolsFor(projectFolder, allowWrites, readableFolder=""):
 	"""Built-in tools Claude may use: none without a project folder, read tools for a read-only folder,
 	read and file-writing tools when writing is allowed. Never Bash, PowerShell, WebFetch, WebSearch or Task.
+	With attached files (readableFolder) and no project folder, only Read, so Claude can open them;
+	Read returns images as pictures Claude can see (Claude Code docs, tools reference, Read).
 	"""
 	if not projectFolder:
-		return ()
+		return ("Read",) if readableFolder else ()
 	return WRITE_TOOLS if allowWrites else READ_TOOLS
 
 
-def buildAskArgs(model="", effort="", projectFolder="", allowWrites=False):
+def buildAskArgs(model="", effort="", projectFolder="", allowWrites=False, readableFolder=""):
 	"""Fixed `claude -p` arguments. The prompt is never on the command line: it is read from stdin.
-	Every list-valued option (--tools, --disallowedTools) is followed by another option, so it can never
-	swallow a following argument.
+	Every list-valued option (--add-dir, --tools, --disallowedTools) is followed by another option, so it can
+	never swallow a following argument.
+	readableFolder is the add-on's private request folder with attached files. Without a project folder it is
+	the working directory; with one it is added with --add-dir ("Additional directories to allow tool access
+	to"), which --restricted includes in the folders the file tools are confined to.
 	"""
-	tools = toolsFor(projectFolder, allowWrites)
+	tools = toolsFor(projectFolder, allowWrites, readableFolder)
 	writes = bool(projectFolder) and allowWrites
 	args = [
 		"-p",
@@ -189,6 +194,10 @@ def buildAskArgs(model="", effort="", projectFolder="", allowWrites=False):
 		"--no-session-persistence",
 		"--strict-mcp-config",
 		"--restricted",
+	]
+	if projectFolder and readableFolder:
+		args += ["--add-dir", base.projectFolderArgument(readableFolder)]
+	args += [
 		"--tools",
 		",".join(tools),
 		"--disallowedTools",
@@ -385,6 +394,7 @@ class ClaudeProvider(base.CliProvider):
 	# typed back into the waiting `claude auth login` ("Paste code here if prompted >").
 	loginAcceptsCode = True
 	defaultEfforts = REASONING_EFFORTS
+	imagesAttachedDirectly = False
 
 	@classmethod
 	def candidatePaths(cls, env=None, isWindows=base.IS_WINDOWS):
@@ -406,16 +416,19 @@ class ClaudeProvider(base.CliProvider):
 	def classifyFailure(self, returnCode, stdout, stderr, prompt=""):
 		return classifyFailure(returnCode, stdout, stderr, prompt=prompt)
 
-	def ask(self, prompt, cancelEvent=None, projectFolder=None, allowWrites=None, model=None, effort=None):
-		"""Send prompt on stdin to `claude -p` and return the answer text. Details go to lastMeta."""
+	def ask(self, prompt, cancelEvent=None, projectFolder=None, allowWrites=None, model=None, effort=None, attachments=None):
+		"""Send prompt on stdin to `claude -p` and return the answer text. Details go to lastMeta.
+		Attached images and files are opened by Claude with its Read tool from the request folder.
+		"""
 		projectFolder, allowWrites, model, effort = self._requestSettings(projectFolder, allowWrites, model, effort)
 		self._checkProjectFolder(projectFolder)
-		args = buildAskArgs(model, effort, projectFolder, allowWrites)
+		readableFolder = attachments.directory if attachments is not None and attachments.hasFiles else ""
+		args = buildAskArgs(model, effort, projectFolder, allowWrites, readableFolder)
 		returnCode, stdout, stderr = self._run(
 			args,
 			inputText=prompt,
 			cancelEvent=cancelEvent,
-			cwd=projectFolder or None,
+			cwd=projectFolder or readableFolder or None,
 		)
 		result = parseResult(stdout)
 		if result is None or result.failed or returnCode != 0:

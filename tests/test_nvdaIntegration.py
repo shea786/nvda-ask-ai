@@ -157,8 +157,11 @@ class FakeClient:
 		self.prompts = []
 		self.terminated = False
 
-	def ask(self, prompt, cancelEvent=None):
+	def ask(self, prompt, cancelEvent=None, attachments=None):
 		self.prompts.append(prompt)
+		self.attachments = attachments
+		if attachments is not None:
+			self.attachedFiles = sorted(os.listdir(attachments.directory))
 		if self.release is not None:
 			self.release.wait(5)
 		if cancelEvent is not None and cancelEvent.is_set():
@@ -207,6 +210,8 @@ class FakeNvdaTestCase(unittest.TestCase):
 			"conversationsDir": self.conversationsDir,
 			"dictationSilenceTimeout": 4,
 			"timeout": 180,
+			# Off for the older tests, which check the plain answer; TestRound6 covers "Done:" / "Failed:".
+			"announceInOtherApps": False,
 			"autoUpdateCheck": True,
 			"lastUpdateCheck": 0.0,
 			# Migration ran already, unless a test says otherwise.
@@ -214,6 +219,10 @@ class FakeNvdaTestCase(unittest.TestCase):
 			"askedToRemoveAskGPT": True,
 		}
 		self.fakeModules["config"].conf["askAI"] = self.conf
+		# The question history goes to a temporary folder, never the real data folder.
+		history = sys.modules["askAI.history"]
+		self.dialogs.state._history = history.QuestionHistory(os.path.join(self.tempDir, "data"))
+		self.dialogs.workDir = os.path.join(self.tempDir, "work")
 		# Never read the developer's real Codex model cache in these tests.
 		self.dialogs.state._models = {"codex": [], "claude": self.providers.claude.presetModels()}
 
@@ -275,6 +284,7 @@ class TestPluginWithFakeNvda(FakeNvdaTestCase):
 				"conversationsDir",
 				"dictationSilenceTimeout",
 				"timeout",
+				"announceInOtherApps",
 				"autoUpdateCheck",
 				"lastUpdateCheck",
 				"migratedFromAskGPT",
@@ -721,10 +731,10 @@ class TestServicesWithFakeNvda(FakeNvdaTestCase):
 
 	def test_statusTexts(self):
 		base = self.codexClient
-		self.assertEqual(self.dialogs.statusText("claude", base.STATE_SUBSCRIPTION), "Signed in with Claude")
-		self.assertEqual(self.dialogs.statusText("codex", base.STATE_SUBSCRIPTION), "Signed in with ChatGPT")
-		self.assertIn("API key", self.dialogs.statusText("claude", base.STATE_API_KEY))
-		self.assertEqual(self.dialogs.statusText("claude", base.STATE_SIGNED_OUT), "Not signed in")
+		self.assertEqual(self.dialogs.loginStatusText("claude", base.STATE_SUBSCRIPTION), "Signed in with Claude")
+		self.assertEqual(self.dialogs.loginStatusText("codex", base.STATE_SUBSCRIPTION), "Signed in with ChatGPT")
+		self.assertIn("API key", self.dialogs.loginStatusText("claude", base.STATE_API_KEY))
+		self.assertEqual(self.dialogs.loginStatusText("claude", base.STATE_SIGNED_OUT), "Not signed in")
 
 	def test_finishLoginForClaude(self):
 		dialogs = self.dialogs
@@ -806,6 +816,224 @@ class TestServicesWithFakeNvda(FakeNvdaTestCase):
 		with mock.patch.object(self.dialogs, "askYesNo", side_effect=AssertionError("asked")):
 			self.package.offerToRemoveOldAddon()
 		self.assertFalse(self.conf["askedToRemoveAskGPT"])
+
+
+class TestRound6(FakeNvdaTestCase):
+	"""Search, question history and drafts, status, "Ask about this" and attached files."""
+
+	def setUp(self):
+		super().setUp()
+		self.attachments = sys.modules["askAI.attachments"]
+		self.context = sys.modules["askAI.context"]
+
+	def test_scriptsAndGestures(self):
+		cls = self.package.GlobalPlugin
+		self.assertEqual(cls.script_reportStatus.gestures, ["kb:NVDA+alt+shift+s"])
+		self.assertTrue(cls.script_reportStatus.speakOnDemand)
+		self.assertEqual(cls.script_reportStatus.category, "Ask AI")
+		self.assertEqual(cls.script_askAboutThis.gestures, ["kb:NVDA+alt+a"])
+		self.assertEqual(cls.script_askAboutThis.category, "Ask AI")
+		spec = self.fakeModules["config"].conf.spec["askAI"]
+		self.assertEqual(spec["announceInOtherApps"], "boolean(default=True)")
+
+	def test_contextAndFilesGoWithTheNextQuestionOnly(self):
+		dialogs = self.dialogs
+		client = self.useClient(FakeClient(answer="It is a report."))
+		conversation = self._conversation(provider="claude")
+		dialogs.state.current = conversation
+		source = os.path.join(self.tempDir, "data.bin")
+		with open(source, "wb") as f:
+			f.write(b"\x00\x01")
+		notes = os.path.join(self.tempDir, "notes.txt")
+		with open(notes, "w", encoding="utf-8") as f:
+			f.write("buy milk")
+		dialogs.state.pendingAttachments.add(source)
+		dialogs.state.pendingAttachments.add(notes)
+		screen = self.context.ScreenContext("Quarterly figures", "selection", "Word", "Report.docx", screenshot=(1, 1, b"\x00\x00\x00\xff"))
+		dialogs.state.pendingContext = screen
+		dialogs.state.includeScreenshot = True
+		dialogs.startRequest("What does this say?", conversation)
+		self.waitForRequests()
+		prompt = client.prompts[0]
+		self.assertIn("Text from the user's screen (Word, Report.docx):\n```\nQuarterly figures\n```", prompt)
+		self.assertIn("Attached file notes.txt:\n```\nbuy milk\n```", prompt)
+		self.assertIn("screenshot.png, data.bin", prompt, "Claude opens images and files from the request folder")
+		self.assertEqual(client.attachedFiles, ["data.bin", "screenshot.png"])
+		self.assertFalse(os.path.exists(client.attachments.directory), "the request folder is deleted afterwards")
+		question = conversation.messages[0]
+		self.assertEqual(question["attachments"], ["screenshot.png", "data.bin", "notes.txt"])
+		self.assertEqual(question["context"], "17 characters from Word, Report.docx")
+		self.assertNotIn("Quarterly", str(conversation.toDict()), "no screen content is stored")
+		self.assertIsNone(dialogs.state.pendingContext)
+		self.assertEqual(len(dialogs.state.pendingAttachments), 0)
+		dialogs.startRequest("Next question", conversation)
+		self.waitForRequests()
+		self.assertIsNone(client.attachments, "attachments applied to one question only")
+		self.assertNotIn("Quarterly", client.prompts[1].split("Earlier conversation")[0])
+
+	def test_screenshotOnlyWhenTicked(self):
+		dialogs = self.dialogs
+		client = self.useClient(FakeClient())
+		conversation = self._conversation()
+		dialogs.state.current = conversation
+		dialogs.state.pendingContext = self.context.ScreenContext("x", "selection", "App", "", screenshot=(1, 1, b"\x00\x00\x00\xff"))
+		dialogs.startRequest("q", conversation)
+		self.waitForRequests()
+		self.assertEqual(client.attachedFiles, [])
+		self.assertNotIn("attachments", conversation.messages[0])
+
+	def test_longQuestionBecomesAFile(self):
+		dialogs = self.dialogs
+		client = self.useClient(FakeClient())
+		conversation = self._conversation()
+		dialogs.state.current = conversation
+		dialogs.startRequest("word " * 8000, conversation)
+		self.waitForRequests()
+		self.assertIn("Attached file question.txt:", client.prompts[0])
+		self.assertIn("Question: My question is in the attached file question.txt.", client.prompts[0])
+		self.assertEqual(conversation.messages[0]["attachments"], ["question.txt"])
+		self.assertLess(len(conversation.messages[0]["text"]), 200)
+
+	def test_historyAndDraft(self):
+		dialogs = self.dialogs
+		self.useClient(FakeClient())
+		conversation = self._conversation(draft="unsent")
+		dialogs.state.current = conversation
+		self.assertTrue(dialogs.state.save(), "a conversation with only a draft is saved")
+		self.assertEqual(self.conversations.ConversationStore(self.conversationsDir).load(conversation.id).draft, "unsent")
+		dialogs.startRequest("First question", conversation)
+		self.waitForRequests()
+		self.assertEqual(conversation.draft, "", "sending clears the draft")
+		dialogs.startRequest("Second question", conversation)
+		self.waitForRequests()
+		self.assertEqual(dialogs.state.history.entries, ["First question", "Second question"])
+		history = sys.modules["askAI.history"]
+		reloaded = history.QuestionHistory(os.path.join(self.tempDir, "data"))
+		self.assertEqual(reloaded.load(), ["First question", "Second question"])
+
+	def test_backgroundDoneAndFailed(self):
+		dialogs = self.dialogs
+		self.conf["announceInOtherApps"] = True
+		self.useClient(FakeClient(answer="**Sunny**."))
+		conversation = self._conversation()
+		dialogs.state.current = conversation
+		dialogs.startRequest("Weather today", conversation)
+		self.waitForRequests()
+		self.assertEqual(self.spoken[-1], "Done: Weather today. Sunny.")
+		error = self.codexClient.ProviderError("network", "x", provider="claude")
+		self.useClient(FakeClient(error=error))
+		dialogs.startRequest("Again", conversation)
+		self.waitForRequests()
+		self.assertEqual(self.spoken[-1], "Failed: Weather today. Couldn't reach Claude. Check your internet connection and try again.")
+
+	def test_status(self):
+		dialogs = self.dialogs
+		base = self.codexClient
+		self.assertEqual(dialogs.currentStatus(), "Idle.")
+		release = threading.Event()
+		self.useClient(FakeClient(answer="A.", release=release))
+		conversation = self._conversation(provider="claude")
+		dialogs.state.current = conversation
+		pending = dialogs.startRequest("Trip plans", conversation)
+		pending.startedAt = time.time() - 40
+		self.assertEqual(dialogs.currentStatus(), "Claude is answering in Trip plans, 40 seconds.")
+		release.set()
+		self.waitForRequests()
+		self.assertTrue(dialogs.currentStatus().startswith("Idle. Last answer from Claude at "))
+		self.assertTrue(dialogs.currentStatus().endswith(" in Trip plans."))
+		dialogs._loginClient = mock.Mock()
+		self.assertEqual(dialogs.currentStatus(), "Waiting for sign-in.")
+		dialogs._loginClient = None
+		dialogs.state.loginStates["claude"] = base.STATE_SIGNED_OUT
+		self.assertEqual(dialogs.currentStatus(), "Not signed in to Claude")
+		# A sign-in error during a request also marks the service as signed out.
+		dialogs.state.loginStates.clear()
+		self.useClient(FakeClient(error=base.ProviderError(base.KIND_NOT_LOGGED_IN, "x", provider="claude")))
+		dialogs.startRequest("q", conversation)
+		self.waitForRequests()
+		self.assertEqual(dialogs.state.loginStates["claude"], base.STATE_SIGNED_OUT)
+		dialogs._activeDictation = mock.Mock()
+		self.assertEqual(dialogs.currentStatus(), "Dictating.")
+		dialogs._activeDictation = None
+		plugin = self.package.GlobalPlugin()
+		plugin.script_reportStatus(None)
+		self.assertEqual(self.spoken[-1], "Not signed in to Claude")
+		plugin.terminate()
+
+	def _fakeAccessibility(self, focus, navigator):
+		textInfos = _module("textInfos", POSITION_SELECTION="selection", POSITION_ALL="all")
+		Role = types.SimpleNamespace(PASSWORDEDIT="passwordEdit")
+		State = types.SimpleNamespace(PROTECTED="protected")
+		api = _module(
+			"api",
+			getFocusObject=lambda: focus,
+			getNavigatorObject=lambda: navigator,
+			getForegroundObject=lambda: types.SimpleNamespace(name="Report.docx - Word"),
+			copyToClip=lambda text: True,
+		)
+		modules = {"textInfos": textInfos, "controlTypes": _module("controlTypes", Role=Role, State=State), "api": api}
+		saved = {name: sys.modules.get(name) for name in modules}
+		sys.modules.update(modules)
+
+		def restore():
+			for name, module in saved.items():
+				if module is None:
+					sys.modules.pop(name, None)
+				else:
+					sys.modules[name] = module
+
+		self.addCleanup(restore)
+
+	def _object(self, selection="", isProtected=False, role="editableText"):
+		def makeTextInfo(position):
+			return types.SimpleNamespace(text=selection if position == "selection" else "all text")
+
+		return types.SimpleNamespace(
+			isProtected=isProtected,
+			role=role,
+			states=set(),
+			name="",
+			value="",
+			makeTextInfo=makeTextInfo,
+			appModule=types.SimpleNamespace(appName="winword", productName="Microsoft Word"),
+		)
+
+	def test_askAboutThis(self):
+		plugin = self.package.GlobalPlugin()
+		opened = []
+		self.dialogs.openAskDialogWithContext = opened.append
+		self._fakeAccessibility(self._object(selection="Selected paragraph"), self._object())
+		with mock.patch.object(sys.modules["askAI"], "captureScreenContext", wraps=self.package.captureScreenContext):
+			plugin.script_askAboutThis(None)
+		self.assertEqual(len(opened), 1)
+		captured = opened[0]
+		self.assertEqual((captured.text, captured.appName, captured.windowTitle), ("Selected paragraph", "Microsoft Word", "Report.docx - Word"))
+		self.assertIsNone(captured.screenshot, "no screenshot outside Windows")
+		plugin.terminate()
+
+	def test_askAboutThisRefusesProtectedFields(self):
+		plugin = self.package.GlobalPlugin()
+		opened = []
+		self.dialogs.openAskDialogWithContext = opened.append
+		self._fakeAccessibility(self._object(selection="hunter2", role="passwordEdit"), self._object())
+		plugin.script_askAboutThis(None)
+		self.assertEqual(self.spoken[-1], "Can't use protected or password fields")
+		self._fakeAccessibility(self._object(), self._object(isProtected=True))
+		plugin.script_askAboutThis(None)
+		self.assertEqual(self.spoken[-1], "Can't use protected or password fields")
+		self.assertEqual(opened, [])
+		self.fakeModules["globalVars"].appArgs.secure = True
+		plugin.script_askAboutThis(None)
+		self.assertEqual(len(self.spoken), 2, "nothing at all in secure mode")
+		plugin.terminate()
+
+	def test_managerSearchSource(self):
+		with open(os.path.join(helpers.PACKAGE_DIR, "conversationManager.py"), encoding="utf-8") as f:
+			source = f.read()
+		self.assertIn("SEARCH_DEBOUNCE_MS = 300", source)
+		self.assertIn("search.filterConversations(listed, self.query)", source)
+		self.assertIn('"{count} conversations match"', source)
+		self.assertLess(source.index('_("&Search:")'), source.index('_("Con&versations:")'), "the Search field is above the list")
 
 
 class FakeSpeech:
@@ -1052,7 +1280,7 @@ class TestMnemonics(unittest.TestCase):
 		labels = [label for letter, label in letters]
 		self.assertEqual(labels[0], "&Question:", "the Question box comes first")
 		# Feature 5: every new control has its own letter.
-		self.assertEqual(sorted(used), sorted("qcdvowsmejfxlrn"), letters)
+		self.assertEqual(sorted(used), sorted("qcdvowsmejfxlrntuhpi"), letters)
 		for label in (
 			"Save ans&wer as...",
 			"AI &service:",
@@ -1091,7 +1319,7 @@ class TestMnemonics(unittest.TestCase):
 			letter for label, letter in {label: letter for letter, label in letters}.items() if label != "Un&archive"
 		]
 		self.assertEqual(len(used), len(set(used)), letters)
-		self.assertEqual(sorted(used), sorted("vhcradxi"), letters)
+		self.assertEqual(sorted(used), sorted("svhcradxi"), letters)
 
 
 if __name__ == "__main__":

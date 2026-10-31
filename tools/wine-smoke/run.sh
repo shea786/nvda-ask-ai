@@ -18,7 +18,7 @@ NVDA_EXE="${NVDA_EXE:-nvda.exe}"
 # ASKAI_SMOKE_ONLY=new runs only the Ask AI 1.2 steps (see askAISmoke.py); Wine passes it on to NVDA.
 export ASKAI_SMOKE_ONLY="${ASKAI_SMOKE_ONLY:-}"
 MIN_CONVERSATIONS=3
-[ "$ASKAI_SMOKE_ONLY" = new ] && MIN_CONVERSATIONS=1
+[ -n "$ASKAI_SMOKE_ONLY" ] && MIN_CONVERSATIONS=1
 
 [ -f "$C/nvda/$NVDA_EXE" ] || { echo "No portable NVDA at C:\\nvda"; exit 1; }
 if ! xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then
@@ -86,6 +86,16 @@ cat > "$OLD_CONVERSATIONS/0123456789abcdef0123456789abcdef.json" <<'EOF'
 EOF
 mkdir -p "$C/smokeproject" "$C/users/$USER/Documents"
 echo "already here" > "$C/smokeproject/existing.txt"
+# Files for the round 6 steps: a text file for "Ask about this" in Notepad, and files to attach.
+mkdir -p "$C/smokefiles"
+rm -f "$C/smokefiles/"*
+printf 'Quarterly figures: revenue 42 million.\r\n' > "$C/smokefiles/context.txt"
+printf 'Buy milk and bread.\n' > "$C/smokefiles/notes.txt"
+head -c 3000 /dev/urandom > "$C/smokefiles/data.bin"
+python3 -I -c 'import struct, sys, zlib
+def chunk(kind, data): return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+raw = b"".join(b"\x00" + b"\xff\x00\x00" * 4 for _ in range(4))
+open(sys.argv[1], "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 4, 4, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))' "$C/smokefiles/pic.png"
 # A Codex model cache like the real one (%USERPROFILE%\.codex\models_cache.json), with made-up models.
 mkdir -p "$C/users/$USER/.codex"
 cp "$HERE/fakecodex/models_cache.json" "$C/users/$USER/.codex/models_cache.json"
@@ -119,7 +129,10 @@ if pgrep -f 'ping.exe' >/dev/null; then echo "SHELL FAIL ping.exe from the fake 
 if grep -q SLOW-FINISHED "$C/fakecodex/calls.log"; then echo "SHELL FAIL a slow fake request ran to completion"; \
 	else echo "SHELL PASS no slow fake request ran to completion"; fi
 # Conversations are saved as JSON files, one per conversation, readable after NVDA exits.
-python3 -I "$HERE/check-conversations.py" "$CONVERSATIONS" "$OLD_CONVERSATIONS" "$MIN_CONVERSATIONS" || true
+# Claude answers are only expected when the run includes Claude steps.
+EXPECT_CLAUDE=1
+case "$ASKAI_SMOKE_ONLY" in round6a|round6b) EXPECT_CLAUDE=0 ;; esac
+python3 -I "$HERE/check-conversations.py" "$CONVERSATIONS" "$OLD_CONVERSATIONS" "$MIN_CONVERSATIONS" "$EXPECT_CLAUDE" || true
 "$WINESERVER" -k 2>/dev/null || true
 # After a wineserver crash the wine loader can wait forever on a defunct nvda.exe.
 kill "$WINE_PID" 2>/dev/null || true

@@ -375,9 +375,12 @@ def buildPrompt(
 	maxTurns=MAX_HISTORY_TURNS,
 	maxChars=MAX_HISTORY_CHARS,
 	projectInstructions="",
+	attachmentSection="",
 ):
 	"""Build the full prompt text, which is always sent on stdin.
 	With projectInstructions (a conversation with a project folder), they are added to the instructions.
+	attachmentSection (fenced screen text, text files and notes about attached files, see
+	attachments.RequestPlan.promptSection) goes right before the question.
 	@param history: earlier messages as (role, text) with role "user" or "assistant", oldest first.
 	A turn is one question plus its answer; only the newest maxTurns turns (2 * maxTurns messages)
 	and at most about maxChars characters of them are kept, dropping the oldest first.
@@ -407,6 +410,8 @@ def buildPrompt(
 	parts = [instructions]
 	if kept:
 		parts.append("Earlier conversation:\n" + "\n".join(kept))
+	if attachmentSection:
+		parts.append(attachmentSection.strip("\n"))
 	parts.append("Question: %s" % (question or "").strip())
 	return "\n\n".join(parts) + "\n"
 
@@ -611,6 +616,9 @@ class CliProvider:
 	loginAcceptsCode = False
 	# Efforts offered when the model is unknown, and the effort flag's values.
 	defaultEfforts = ("low", "medium", "high")
+	# True when images go to the service with the message (an image option); False when the AI must open
+	# them from the request folder with its file tools.
+	imagesAttachedDirectly = False
 
 	def __init__(
 		self,
@@ -855,8 +863,10 @@ class CliProvider:
 
 	# Public API
 
-	def ask(self, prompt, cancelEvent=None, projectFolder=None, allowWrites=None, model=None, effort=None):
-		"""Send prompt (built with buildPrompt) on stdin and return the answer text."""
+	def ask(self, prompt, cancelEvent=None, projectFolder=None, allowWrites=None, model=None, effort=None, attachments=None):
+		"""Send prompt (built with buildPrompt) on stdin and return the answer text.
+		@param attachments: an attachments.RequestPlan (its files already copied into its directory) or None.
+		"""
 		raise NotImplementedError
 
 	def loginStatus(self):

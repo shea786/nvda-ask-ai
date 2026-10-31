@@ -18,7 +18,11 @@ from gui.dpiScalingHelper import DpiScalingHelperMixinWithoutInit
 from gui.settingsDialogs import NVDASettingsDialog, SettingsPanel
 from logHandler import log
 
-from . import conversations, dictation, exporters, folderSnapshot, providers
+import tempfile
+import time
+
+from . import attachments, conversations, dictation, exporters, folderSnapshot, history, providers, search
+from . import status as statusText
 from .providers import base as providerBase
 from .providers import modelCatalog
 from .providers import ProviderError
@@ -107,12 +111,25 @@ class PendingRequest:
 	and tied to the conversation it was asked in.
 	"""
 
-	def __init__(self, client, question, conversationId, projectFolder="", providerId=providers.DEFAULT_PROVIDER):
+	def __init__(
+		self,
+		client,
+		question,
+		conversationId,
+		projectFolder="",
+		providerId=providers.DEFAULT_PROVIDER,
+		plan=None,
+		title="",
+	):
 		self.client = client
 		self.question = question
 		self.conversationId = conversationId
 		self.projectFolder = projectFolder
 		self.providerId = providerId
+		# attachments.RequestPlan with the request's private folder, or None.
+		self.plan = plan
+		self.title = title
+		self.startedAt = time.time()
 		self.cancelEvent = threading.Event()
 
 
@@ -125,6 +142,35 @@ class AppState:
 		self._store = None
 		self._storeFolder = None
 		self._models = {}
+		# Attached to the next question only (see "Ask about this" and "Attach files").
+		self.pendingContext = None
+		self.includeScreenshot = False
+		self.pendingAttachments = attachments.PendingAttachments()
+		# The last search in the Conversation box, offered again by Ctrl+F.
+		self.lastSearch = ""
+		self._history = None
+		# (providerId, time, conversation title) of the newest answer, for the status report.
+		self.lastAnswerInfo = None
+		# Last known sign-in state per service (from status checks and request results); no process is run.
+		self.loginStates = {}
+
+	@property
+	def history(self):
+		"""The global question history (%LOCALAPPDATA%\\askAI\\history.json), loaded on first use."""
+		if self._history is None:
+			folder = providerBase.dataDir() or os.path.join(tempfile.gettempdir(), "askAI-data")
+			self._history = history.QuestionHistory(folder)
+			try:
+				self._history.load()
+			except Exception:
+				log.debugWarning("Ask AI: could not read the question history", exc_info=True)
+		return self._history
+
+	def clearPendingInput(self):
+		"""Forget the context, screenshot and files attached to the next question."""
+		self.pendingContext = None
+		self.includeScreenshot = False
+		self.pendingAttachments = attachments.PendingAttachments()
 
 	# Conversations
 
@@ -163,7 +209,7 @@ class AppState:
 	def save(self, conversation=None):
 		"""Save a conversation that has content. Errors are logged and announced, never raised."""
 		conversation = conversation or self.current
-		if conversation is None or (conversation.isEmpty and not conversation.projectFolder):
+		if conversation is None or (conversation.isEmpty and not conversation.projectFolder and not conversation.draft):
 			return False
 		try:
 			self.store.save(conversation)
@@ -305,6 +351,37 @@ def fileChangesText(created, changed):
 				files = _("{files} and {count} more").format(files=files, count=more)
 			parts.append(template.format(files=files))
 	return ". ".join(parts)
+
+
+def contextSummaryTemplate():
+	# Translators: Summary of attached screen text, e.g. "1,240 characters from Microsoft Word, Report.docx".
+	return _("{count} characters from {where}")
+
+
+def attachmentLabel(item):
+	"""List entry for an attachment, e.g. "notes.txt, text, 12 KB"."""
+	kinds = {
+		# Translators: Kind of attached file: sent as a picture.
+		attachments.KIND_IMAGE: _("image"),
+		# Translators: Kind of attached file: put into the question as text.
+		attachments.KIND_TEXT: _("text"),
+		# Translators: Kind of attached file: copied for the AI to open.
+		attachments.KIND_FILE: _("file"),
+	}
+	size = max(1, (item.size + 1023) // 1024)
+	# Translators: An attachment in the list. {name} file name, {kind} e.g. "image", {size} kilobytes.
+	return _("{name}, {kind}, {size} KB").format(name=item.name, kind=kinds.get(item.kind, item.kind), size=size)
+
+
+def attachmentProblem(error):
+	if error.reason == attachments.REASON_TOO_LARGE:
+		# Translators: Error when a file is too big to attach. {name} is the file name.
+		return _("{name} is larger than 25 MB and cannot be attached.").format(name=error.name)
+	if error.reason == attachments.REASON_DUPLICATE:
+		# Translators: Error when the same file is attached twice. {name} is the file name.
+		return _("{name} is already attached.").format(name=error.name)
+	# Translators: Error when a file cannot be read. {name} is the file name.
+	return _("{name} could not be read.").format(name=error.name)
 
 
 def resetTimeText(error):
@@ -538,8 +615,10 @@ def saveDocument(parent, folder, formatKey, baseName, docTitle, blocks, markdown
 # Request lifecycle (main thread unless noted)
 
 
-def buildRequestPrompt(question, conversation):
-	"""The prompt for a question: instructions (with the service's project folder rules), context, question."""
+def buildRequestPrompt(question, conversation, attachmentSection=""):
+	"""The prompt for a question: instructions (with the service's project folder rules), earlier
+	conversation, attached screen text and files (fenced, as data), then the question.
+	"""
 	conf = getConf()
 	history = conversation.history if conf["keepContext"] else []
 	projectInstructions = ""
@@ -550,20 +629,54 @@ def buildRequestPrompt(question, conversation):
 		history,
 		conf["instructions"],
 		projectInstructions=projectInstructions,
+		attachmentSection=attachmentSection,
 	)
 
 
 def startRequest(question, conversation):
-	prompt = buildRequestPrompt(question, conversation)
-	conversation.addMessage(conversations.ROLE_USER, question)
+	"""Send question with whatever is attached (screen context, screenshot, files). Main thread.
+	A question over attachments.LONG_QUESTION_CHARS is sent as an attached file, question.txt.
+	The attachments apply to this question only and are cleared afterwards.
+	"""
 	providerId = conversation.provider if providers.isKnown(conversation.provider) else providers.DEFAULT_PROVIDER
+	items = list(state.pendingAttachments)
+	longAttachment, sentQuestion = attachments.longQuestion(question)
+	if longAttachment is not None:
+		items.append(longAttachment)
+	context = state.pendingContext
+	screenshot = context.screenshot if context is not None and state.includeScreenshot else None
+	plan = None
+	section = ""
+	if items or context is not None:
+		directory = attachments.RequestFiles.create(workDir or providerBase.defaultWorkDir())
+		plan = attachments.RequestPlan(directory, items, context, screenshot)
+		section = plan.promptSection(providers.get(providerId).imagesAttachedDirectly)
+	prompt = buildRequestPrompt(sentQuestion, conversation, section)
+	shownQuestion = question if longAttachment is None else "%s (%s)" % (sentQuestion, longAttachment.name)
+	conversation.addMessage(
+		conversations.ROLE_USER,
+		shownQuestion,
+		metadata=attachments.messageMetadata(items, context, screenshot is not None),
+	)
+	conversation.draft = ""
+	# Saved right away, so the sent question is kept and the cleared draft cannot come back after a crash.
+	state.save(conversation)
+	try:
+		state.history.add(question)
+	except Exception:
+		log.debugWarning("Ask AI: could not save the question history", exc_info=True)
+	state.clearPendingInput()
 	pending = PendingRequest(
 		makeClient(conversation=conversation),
-		question,
+		shownQuestion,
 		conversation.id,
 		conversation.projectFolder,
 		providerId,
+		plan,
+		conversation.title,
 	)
+	# What the user typed, given back to the Question box if the request fails or is cancelled.
+	pending.typedQuestion = question
 	state.pending = pending
 	threading.Thread(target=_requestWorker, args=(pending, prompt), name="askAI.ask", daemon=True).start()
 	return pending
@@ -573,7 +686,20 @@ def _requestWorker(pending, prompt):
 	"""Background thread. Snapshots the project folder around the request to find new files."""
 	before = folderSnapshot.snapshot(pending.projectFolder) if pending.projectFolder else None
 	try:
-		answer = pending.client.ask(prompt, pending.cancelEvent)
+		if pending.plan is not None:
+			try:
+				attachments.RequestFiles.prepare(pending.plan)
+			except Exception as e:
+				log.error("Ask AI: could not prepare the attached files", exc_info=True)
+				raise ProviderError(
+					providerBase.KIND_OTHER,
+					"The attached files could not be prepared.",
+					str(e),
+					provider=pending.providerId,
+				)
+			answer = pending.client.ask(prompt, pending.cancelEvent, attachments=pending.plan)
+		else:
+			answer = pending.client.ask(prompt, pending.cancelEvent)
 	except ProviderError as e:
 		if e.kind != providerBase.KIND_CANCELLED:
 			log.debugWarning("Ask AI: %s: %s: %s | %s" % (pending.providerId, e.kind, e.message, e.detail))
@@ -584,6 +710,10 @@ def _requestWorker(pending, prompt):
 		error = ProviderError(providerBase.KIND_OTHER, "", str(e), provider=pending.providerId)
 		wx.CallAfter(_onRequestDone, pending, None, error, (), ())
 		return
+	finally:
+		# The request's private folder (copied files, screenshot) is never kept.
+		if pending.plan is not None:
+			attachments.RequestFiles.remove(pending.plan.directory)
 	created, changed = (), ()
 	if before is not None:
 		try:
@@ -607,6 +737,44 @@ def cancelRequest():
 	return pending
 
 
+def statusTemplates():
+	"""Translated templates for status.statusText / doneText / failedText."""
+	return {
+		# Translators: Status report while an answer is coming. {service} is "ChatGPT" or "Claude",
+		# {title} the conversation title, {elapsed} e.g. "40 seconds".
+		"answering": _("{service} is answering in {title}, {elapsed}."),
+		# Translators: Status report while voice typing keeps NVDA quiet.
+		"dictating": _("Dictating."),
+		# Translators: Status report while a sign-in waits for the browser.
+		"signingIn": _("Waiting for sign-in."),
+		# Translators: Status report when the current service is signed out. {service} is "ChatGPT" or "Claude".
+		"notSignedIn": _("Not signed in to {service}"),
+		# Translators: Status report when nothing is running. {service} is "ChatGPT" or "Claude",
+		# {time} e.g. "3:05 PM", {title} the conversation title.
+		"idleWithAnswer": _("Idle. Last answer from {service} at {time} in {title}."),
+		# Translators: Status report when nothing is running and there is no answer yet.
+		"idle": _("Idle."),
+		# Translators: A duration in seconds, e.g. "40 seconds".
+		"seconds": _("{seconds} seconds"),
+		# Translators: A duration of one second.
+		"oneSecond": _("1 second"),
+		# Translators: A duration, e.g. "2 minutes 5 seconds".
+		"minutes": _("{minutes} minutes {seconds} seconds"),
+		# Translators: Spoken before an answer that arrives while the user works in another app. {title} is the conversation.
+		"done": _("Done: {title}."),
+		# Translators: Spoken when a question fails while the user works in another app. {reason} explains why.
+		"failed": _("Failed: {title}. {reason}"),
+		"untitled": _("Untitled conversation"),
+	}
+
+
+def _dialogInForeground(dialog):
+	try:
+		return dialog is not None and dialog.IsActive()
+	except Exception:
+		return False
+
+
 def _onRequestDone(pending, answer, error, created, changed):
 	if pending is not state.pending:
 		return  # Cancelled.
@@ -617,39 +785,80 @@ def _onRequestDone(pending, answer, error, created, changed):
 		return
 	isCurrent = conversation is state.current
 	dialog = AskAIDialog.getInstance()
+	# Working in another app: say which conversation finished (phrases from T3 Code's announcer).
+	background = getConf()["announceInOtherApps"] and not _dialogInForeground(dialog)
+	templates = statusTemplates()
+	title = conversation.title
 	if error is None:
 		conversation.addMessage(conversations.ROLE_ASSISTANT, answer, provider=pending.providerId)
+		state.lastAnswerInfo = (pending.providerId, time.time(), title)
+		if state.loginStates.get(pending.providerId) != providerBase.STATE_API_KEY:
+			state.loginStates[pending.providerId] = providerBase.STATE_SUBSCRIPTION
 		changes = fileChangesText(created, changed)
 		if changes:
 			conversation.addMessage(conversations.ROLE_NOTE, changes)
 		state.save(conversation)
 		spoken = stripMarkdown(answer) or answer
 		if dialog is not None and isCurrent:
-			dialog.onAnswer(spoken, changes)
+			dialog.onAnswer(spoken, changes, doneTitle=title if background else None)
 		elif getConf()["speakAnswers"]:
-			ui.message(spoken)
+			ui.message(statusText.doneText(title, spoken, templates) if background else spoken)
 			if changes:
 				ui.message(changes)
 		else:
 			# Translators: Announced when an answer arrives after the dialog was closed and speaking is off.
-			ui.message(_("The answer is ready. Press NVDA+Alt+Shift+G to hear it."))
+			ready = _("The answer is ready. Press NVDA+Alt+Shift+G to hear it.")
+			ui.message(statusText.doneText(title, ready, templates) if background else ready)
 		return
+	if error.kind == providerBase.KIND_NOT_LOGGED_IN:
+		state.loginStates[pending.providerId] = providerBase.STATE_SIGNED_OUT
 	conversation.addMessage(conversations.ROLE_ERROR, transcriptErrorText(error))
 	state.save(conversation)
-	if dialog is not None and isCurrent:
-		dialog.onFailure(pending.question, error)
+	if background:
+		if dialog is not None and isCurrent:
+			dialog.onFailure(getattr(pending, "typedQuestion", pending.question), error, quiet=True)
+		ui.message(statusText.failedText(title, friendlyError(error), templates))
+	elif dialog is not None and isCurrent:
+		dialog.onFailure(getattr(pending, "typedQuestion", pending.question), error)
 	else:
 		ui.message(friendlyError(error))
 
 
+def currentStatus(now=None):
+	"""The "Report Ask AI status" sentence. Uses only what the add-on already knows; runs no program."""
+	conversation = state.current
+	providerId = conversation.provider if conversation is not None and providers.isKnown(conversation.provider) else defaultProvider()
+	pending = state.pending
+	answering = None
+	if pending is not None:
+		answering = (serviceName(pending.providerId), pending.title, pending.startedAt)
+	lastAnswer = None
+	if state.lastAnswerInfo is not None:
+		answerProvider, answeredAt, answerTitle = state.lastAnswerInfo
+		lastAnswer = (serviceName(answerProvider), answeredAt, answerTitle)
+	snapshot = statusText.StatusSnapshot(
+		answering=answering,
+		dictating=_activeDictation is not None,
+		signingIn=_loginClient is not None,
+		service=serviceName(providerId),
+		signedOut=state.loginStates.get(providerId) == providerBase.STATE_SIGNED_OUT,
+		lastAnswer=lastAnswer,
+	)
+	return statusText.statusText(snapshot, now, statusTemplates())
+
+
 def switchConversation(conversation):
-	"""Make conversation current (main thread). The running request keeps its own conversation."""
+	"""Make conversation current (main thread). The running request keeps its own conversation.
+	The Question text is kept as the old conversation's draft, and the new one's draft is restored.
+	"""
+	dialog = AskAIDialog.getInstance()
 	if state.current is not None and state.current is not conversation:
+		if dialog is not None:
+			dialog.saveDraft(silent=True)
 		state.save(state.current)
 	state.current = conversation
-	dialog = AskAIDialog.getInstance()
 	if dialog is not None:
-		dialog.loadConversation()
+		dialog.loadConversation(restoreDraft=True)
 
 
 def cancelLogin():
@@ -687,6 +896,7 @@ def _finishLogin(client, timedOut):
 
 
 def _announceLoginResult(providerId, loginState, text):
+	state.loginStates[providerId] = loginState
 	if loginState == providerBase.STATE_API_KEY:
 		# Translators: Announced when the program is signed in with an API key. {program} is e.g. "Codex".
 		ui.message(_("{program} is signed in with an API key, not with your subscription.").format(program=programName(providerId)))
@@ -705,7 +915,7 @@ def _refreshPanel():
 		panel.refreshStatus()
 
 
-def statusText(providerId, loginState):
+def loginStatusText(providerId, loginState):
 	"""The Status field text for a sign-in state."""
 	if loginState == providerBase.STATE_API_KEY:
 		# Translators: Status when the program uses an API key instead of the user's subscription.
@@ -746,7 +956,8 @@ def shutdown():
 
 class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 	"""Non-modal dialog for asking questions. Only one instance exists at a time.
-	Mnemonics: Q A/C D V O W S M E J F X L R N (Cancel shares the Ask button).
+	Mnemonics: Q A/C D T U H P I V O W S M E J F X L R N (Cancel shares the Ask button).
+	Keys: Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+S save draft, Up / Down recall questions.
 	"""
 
 	_instance = None
@@ -771,6 +982,9 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self._modelSlugs = []
 		self._effortValues = []
 		self._providerIds = providers.ids()
+		self._recall = history.QuestionRecall()
+		# Start of the current search match in the Conversation text, or None.
+		self._matchStart = None
 		self.beepTimer = wx.Timer(self)
 		self.dictationTimer = wx.Timer(self)
 		width = self.scaleSize(ASK_TEXT_WIDTH)
@@ -795,6 +1009,67 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self.dictateButton = actionButtons.addButton(self, label=_("&Dictate (Windows voice typing)"))
 		self.dictateButton.Bind(wx.EVT_BUTTON, self.onDictate)
 		sHelper.addItem(actionButtons)
+
+		# Screen text attached by "Ask about this" (NVDA+Alt+A); shown only while some is attached.
+		contextLabel = wx.StaticText(
+			self,
+			# Translators: Label of the read-only field summarising the screen text attached to the next question.
+			label=_("Context:"),
+		)
+		self.contextCtrl = wx.TextCtrl(self, style=STATUS_STYLE, size=(width - self.scaleSize(200), -1))
+		self.contextCtrl.SetInitialSize((width - self.scaleSize(200), int(self.contextCtrl.GetCharHeight() * 1.6)))
+		self.removeContextButton = wx.Button(
+			self,
+			# Translators: Button that removes the screen text attached to the next question.
+			label=_("Remove con&text"),
+		)
+		self.removeContextButton.Bind(wx.EVT_BUTTON, self.onRemoveContext)
+		self.screenshotCheck = wx.CheckBox(
+			self,
+			# Translators: Checkbox to send a picture of the window together with the attached screen text.
+			label=_("Incl&ude a screenshot of the window"),
+		)
+		self.screenshotCheck.Bind(wx.EVT_CHECKBOX, self.onScreenshotCheck)
+		contextRow = wx.BoxSizer(wx.HORIZONTAL)
+		contextRow.Add(contextLabel, flag=wx.ALIGN_CENTER_VERTICAL)
+		contextRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+		contextRow.Add(self.contextCtrl, proportion=1, flag=wx.ALIGN_CENTER_VERTICAL)
+		contextRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+		contextRow.Add(self.removeContextButton, flag=wx.ALIGN_CENTER_VERTICAL)
+		self.contextBlock = wx.BoxSizer(wx.VERTICAL)
+		self.contextBlock.Add(contextRow, flag=wx.EXPAND)
+		self.contextBlock.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+		self.contextBlock.Add(self.screenshotCheck)
+		sHelper.addItem(self.contextBlock, flag=wx.EXPAND)
+
+		# Files attached to the next question.
+		attachRow = wx.BoxSizer(wx.HORIZONTAL)
+		self.attachButton = wx.Button(
+			self,
+			# Translators: Button that attaches files (documents, images) to the next question.
+			label=_("Attac&h files..."),
+		)
+		self.attachButton.Bind(wx.EVT_BUTTON, self.onAttachFiles)
+		attachmentsLabel = wx.StaticText(
+			self,
+			# Translators: Label of the list of files attached to the next question.
+			label=_("&Pending attachments:"),
+		)
+		self.attachmentsList = wx.ListBox(self, size=(self.scaleSize(260), self.scaleSize(50)))
+		self.removeAttachmentButton = wx.Button(
+			self,
+			# Translators: Button that removes the selected file from the attachments.
+			label=_("Remove f&ile"),
+		)
+		self.removeAttachmentButton.Bind(wx.EVT_BUTTON, self.onRemoveAttachment)
+		attachRow.Add(self.attachButton, flag=wx.ALIGN_CENTER_VERTICAL)
+		attachRow.AddSpacer(guiHelper.SPACE_BETWEEN_BUTTONS_HORIZONTAL)
+		attachRow.Add(attachmentsLabel, flag=wx.ALIGN_CENTER_VERTICAL)
+		attachRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+		attachRow.Add(self.attachmentsList, proportion=1)
+		attachRow.AddSpacer(guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+		attachRow.Add(self.removeAttachmentButton, flag=wx.ALIGN_CENTER_VERTICAL)
+		sHelper.addItem(attachRow, flag=wx.EXPAND)
 
 		self.conversationCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the read-only box showing the conversation.
@@ -882,7 +1157,8 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self.Bind(wx.EVT_TIMER, self.onBeepTimer, self.beepTimer)
 		self.Bind(wx.EVT_TIMER, self.onDictationTimer, self.dictationTimer)
 		state.reloadModels()
-		self.loadConversation()
+		self.loadConversation(restoreDraft=True)
+		self.updatePendingInput()
 		if state.pending is not None:
 			self._setBusy(True)  # A question asked before the dialog was closed is still running.
 		self.questionCtrl.SetFocus()
@@ -898,9 +1174,18 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		providerId = self.conversation.provider
 		return providerId if providers.isKnown(providerId) else providers.DEFAULT_PROVIDER
 
-	def loadConversation(self):
-		"""Show the current conversation: title, Conversation box, service, model, effort and project folder."""
+	def loadConversation(self, restoreDraft=False):
+		"""Show the current conversation: title, Conversation box, service, model, effort and project folder.
+		With restoreDraft (opening or continuing it), its saved draft goes into an empty Question box.
+		"""
 		conversation = self.conversation
+		self._matchStart = None
+		self._recall.reset()
+		if restoreDraft and conversation.draft and not self.questionCtrl.GetValue().strip():
+			self.questionCtrl.SetValue(conversation.draft)
+			self.questionCtrl.SetInsertionPointEnd()
+			# Translators: Announced when a conversation opens with its unsent question.
+			wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS * 3, ui.message, _("Draft restored"))
 		self._updateTitle()
 		self._shownEntries = []
 		self._refreshConversationBox(rebuild=True)
@@ -1099,10 +1384,211 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		# Translators: Announced when a new conversation starts.
 		self._announceAfterFocus(self.questionCtrl, _("New conversation started."))
 
+	# Drafts
+
+	def saveDraft(self, silent=False):
+		"""Keep the Question text as the conversation's draft (an empty box clears it)."""
+		if not self:
+			return
+		conversation = self.conversation
+		text = self.questionCtrl.GetValue()
+		if self._recall.shown is not None and text == self._recall.shown:
+			text = self._recall.typed  # A recalled earlier question is not a draft.
+		if text.strip() == conversation.draft.strip():
+			if not silent:
+				ui.message(_("Draft saved"))
+			return
+		conversation.draft = text if text.strip() else ""
+		conversation.touch()
+		state.save(conversation)
+		if not silent:
+			# Translators: Announced after Ctrl+S saves the Question text as the conversation's draft.
+			ui.message(_("Draft saved"))
+
+	# Attached context and files
+
+	def updatePendingInput(self):
+		"""Show the attached screen text and files (the Context row only while there is context)."""
+		if not self:
+			return
+		context = state.pendingContext
+		self.contextCtrl.SetValue(context.summary(contextSummaryTemplate()) if context is not None else "")
+		self.screenshotCheck.SetValue(state.includeScreenshot)
+		self.screenshotCheck.Enable(context is not None and context.screenshot is not None)
+		self.contextBlock.ShowItems(context is not None)
+		items = [attachmentLabel(item) for item in state.pendingAttachments]
+		self.attachmentsList.Set(items)
+		if items:
+			self.attachmentsList.SetSelection(0)
+		self.removeAttachmentButton.Enable(bool(items))
+		self.Layout()
+		self.GetSizer().Fit(self)
+
+	def attachContext(self, context):
+		"""Main thread: context from "Ask about this" applies to the next question."""
+		state.pendingContext = context
+		state.includeScreenshot = False
+		self.updatePendingInput()
+		where = context.appName or context.windowTitle
+		# Translators: Announced after "Ask about this". {app} is the application, e.g. "Microsoft Word".
+		self._announceAfterFocus(self.questionCtrl, _("Context attached from {app}. Type your question.").format(app=where))
+
+	def onRemoveContext(self, evt):
+		state.pendingContext = None
+		state.includeScreenshot = False
+		self.updatePendingInput()
+		# Translators: Announced after the attached screen text was removed.
+		self._announceAfterFocus(self.questionCtrl, _("Context removed"))
+
+	def onScreenshotCheck(self, evt):
+		state.includeScreenshot = self.screenshotCheck.GetValue()
+
+	def onAttachFiles(self, evt):
+		with wx.FileDialog(
+			self,
+			# Translators: Title of the file chooser for attaching files to the next question.
+			_("Attach files to the next question"),
+			# Translators: File type filter for attachments.
+			wildcard=_("All files (*.*)|*.*"),
+			style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST | wx.FD_MULTIPLE,
+		) as fileDialog:
+			if fileDialog.ShowModal() != wx.ID_OK:
+				return
+			paths = fileDialog.GetPaths()
+		added, problems = self.attachPaths(paths)
+		if problems:
+			showError("\n".join(problems), self)
+		if added:
+			# Translators: Announced after attaching files. {count} is a number.
+			message = ngettext("{count} file attached", "{count} files attached", added).format(count=added)
+			self._announceAfterFocus(self.attachmentsList, message)
+
+	def attachPaths(self, paths):
+		"""Attach files; returns (number added, [problem messages])."""
+		added = 0
+		problems = []
+		for path in paths:
+			try:
+				state.pendingAttachments.add(path)
+				added += 1
+			except attachments.AttachmentError as e:
+				problems.append(attachmentProblem(e))
+		self.updatePendingInput()
+		return added, problems
+
+	def onRemoveAttachment(self, evt):
+		index = self.attachmentsList.GetSelection()
+		if index < 0 or index >= len(state.pendingAttachments):
+			return
+		item = state.pendingAttachments.remove(index)
+		self.updatePendingInput()
+		if len(state.pendingAttachments):
+			self.attachmentsList.SetSelection(min(index, len(state.pendingAttachments) - 1))
+			target = self.attachmentsList
+		else:
+			target = self.attachButton
+		# Translators: Announced after removing an attachment. {name} is the file name.
+		self._announceAfterFocus(target, _("Removed {name}").format(name=item.name))
+
+	# Search in the Conversation box
+
+	def onFind(self):
+		with wx.TextEntryDialog(
+			self,
+			# Translators: Prompt of the find dialog for the Conversation box.
+			_("Find in the conversation:"),
+			# Translators: Title of the find dialog.
+			_("Find"),
+			state.lastSearch,
+		) as findDialog:
+			if findDialog.ShowModal() != wx.ID_OK:
+				return
+			query = findDialog.GetValue().strip()
+		if not query:
+			return
+		state.lastSearch = query
+		self._matchStart = None
+		self.findNext(forward=True, fromCaret=True)
+
+	def findNext(self, forward=True, fromCaret=False):
+		"""Select the next (or previous) match in the Conversation box, focus it and say "Match 2 of 5"."""
+		query = state.lastSearch
+		if not query:
+			self.onFind()
+			return
+		ctrl = self.conversationCtrl
+		value = ctrl.GetValue()
+		matches = search.findMatches(value, query)
+		if not matches:
+			# Translators: Reported when the search finds nothing. {query} is the search text.
+			ui.message(_("No matches for {query}").format(query=query))
+			return
+		wrapped = False
+		if fromCaret or self._matchStart is None:
+			index = search.nearestMatch(matches, 0, forward=True) if fromCaret else (0 if forward else len(matches) - 1)
+		elif forward:
+			later = [i for i, start in enumerate(matches) if start > self._matchStart]
+			index, wrapped = (later[0], False) if later else (0, True)
+		else:
+			earlier = [i for i, start in enumerate(matches) if start < self._matchStart]
+			index, wrapped = (earlier[-1], False) if earlier else (len(matches) - 1, True)
+		start = matches[index]
+		self._matchStart = start
+		lastPosition = ctrl.GetLastPosition()
+		begin = search.controlPosition(value, start, lastPosition)
+		end = search.controlPosition(value, start + len(query), lastPosition)
+		ctrl.SetFocus()
+		ctrl.SetSelection(begin, end)
+		ctrl.ShowPosition(begin)
+		parts = []
+		if wrapped:
+			# Translators: Announced when the search goes past the last (or first) match and starts again.
+			parts.append(_("Wrapped to first match.") if forward else _("Wrapped to last match."))
+		# Translators: Announced for a search match. {number} and {count} are numbers, {line} is the matched line.
+		parts.append(_("Match {number} of {count}.").format(number=index + 1, count=len(matches)))
+		parts.append(search.lineAt(value, start))
+		wx.CallLater(ANNOUNCE_AFTER_FOCUS_MS, ui.message, " ".join(parts))
+
+	# Question recall
+
+	def recallQuestion(self, older):
+		value = self.questionCtrl.GetValue()
+		entries = history.recallList(self.conversation.questions, state.history.entries)
+		text, result = self._recall.move(value, entries, older)
+		if text is not None:
+			self.questionCtrl.SetValue(text)
+			self.questionCtrl.SetInsertionPointEnd()
+		if result == history.NO_EARLIER:
+			# Translators: Announced when Up has no earlier question to recall.
+			ui.message(_("No earlier question"))
+		elif result == history.NO_LATER:
+			# Translators: Announced when Down goes past the newest recalled question.
+			ui.message(_("No later question"))
+		elif text is not None:
+			ui.message(text)
+
 	# Keyboard
 
 	def onCharHook(self, evt):
 		key = evt.GetKeyCode()
+		control, shift, alt = evt.ControlDown(), evt.ShiftDown(), evt.AltDown()
+		if control and not alt and not shift and key in (ord("F"), ord("f")):
+			self.onFind()
+			return
+		if key == wx.WXK_F3 and not control and not alt:
+			self.findNext(forward=not shift)
+			return
+		if control and not alt and not shift and key in (ord("S"), ord("s")):
+			self.saveDraft()
+			return
+		if (
+			key in (wx.WXK_UP, wx.WXK_DOWN)
+			and not (control or shift or alt)
+			and self.FindFocus() == self.questionCtrl
+			and self._recall.canRecall(self.questionCtrl.GetValue())
+		):
+			self.recallQuestion(older=key == wx.WXK_UP)
+			return
 		if key == wx.WXK_ESCAPE:
 			if self._dictation is not None:
 				self._finishDictation(dictation.REASON_ESCAPE)
@@ -1147,31 +1633,45 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 			ui.message(_("Type or dictate a question first."))
 			self.questionCtrl.SetFocus()
 			return
+		longText = len(question) > attachments.LONG_QUESTION_CHARS
 		startRequest(question, self.conversation)
+		self._recall.reset()
 		self._updateTitle()
 		self._refreshConversationBox()
 		self.questionCtrl.Clear()
+		self.updatePendingInput()
 		self._setBusy(True)
+		if longText:
+			# Translators: Announced when a very long question is sent as an attached file.
+			ui.message(_("Long text attached as a file"))
 		# Translators: Announced while waiting for an answer. {service} is "ChatGPT" or "Claude".
 		ui.message(_("Asking {service}…").format(service=serviceName(self.providerId)))
 
-	def onAnswer(self, spoken, changes):
+	def onAnswer(self, spoken, changes, doneTitle=None):
+		"""Show and speak an answer. doneTitle (the user is in another app) prefixes "Done: <title>."."""
 		self._setBusy(False)
 		self._refreshConversationBox()
 		if getConf()["speakAnswers"]:
-			ui.message(spoken)
+			message = spoken
 		else:
 			# Translators: Announced when an answer arrives and automatic speaking is off.
-			ui.message(_("Answer received. It is in the conversation box."))
+			message = _("Answer received. It is in the conversation box.")
+		if doneTitle is not None:
+			message = statusText.doneText(doneTitle, message, statusTemplates())
+		ui.message(message)
 		if changes:
 			ui.message(changes)
 
-	def onFailure(self, question, error):
+	def onFailure(self, question, error, quiet=False):
+		"""Show a failure. quiet (the user is in another app): no dialog; the caller speaks "Failed: ...".
+		"""
 		self._setBusy(False)
 		self._refreshConversationBox()
 		if not self.questionCtrl.GetValue().strip():
 			self.questionCtrl.SetValue(question)
 			self.questionCtrl.SetInsertionPointEnd()
+		if quiet:
+			return
 		providerId = getattr(error, "provider", "") or self.providerId
 		if error.kind == providerBase.KIND_NOT_LOGGED_IN:
 			# Translators: Yes/No question after a sign-in error. {program} is e.g. "Codex", {service} "ChatGPT".
@@ -1197,7 +1697,7 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 		self._setBusy(False)
 		self._refreshConversationBox()
 		if not self.questionCtrl.GetValue().strip():
-			self.questionCtrl.SetValue(pending.question)
+			self.questionCtrl.SetValue(getattr(pending, "typedQuestion", pending.question))
 			self.questionCtrl.SetInsertionPointEnd()
 		if announce:
 			# Translators: Announced when the user cancels a question.
@@ -1388,6 +1888,10 @@ class AskAIDialog(DpiScalingHelperMixinWithoutInit, wx.Dialog):
 
 	def onClose(self, evt):
 		self._finishDictation(dictation.REASON_CLOSE)
+		try:
+			self.saveDraft(silent=True)
+		except Exception:
+			log.debugWarning("Ask AI: could not save the draft", exc_info=True)
 		pending = state.pending
 		if pending is not None:
 			service = serviceName(pending.providerId)
@@ -1420,6 +1924,16 @@ def openAskDialog():
 		dialog.questionCtrl.SetFocus()
 	finally:
 		gui.mainFrame.postPopup()
+
+
+def openAskDialogWithContext(screenContext):
+	"""Open (or raise) the Ask dialog on the current conversation with screen text attached. Main thread."""
+	openAskDialog()
+	dialog = AskAIDialog.getInstance()
+	if dialog is not None:
+		dialog.attachContext(screenContext)
+	else:
+		state.pendingContext = screenContext
 
 
 def closeAskDialog():
@@ -1626,6 +2140,13 @@ class AskAISettingsPanel(SettingsPanel):
 			wx.CheckBox(self, label=_("Allow the AI to create and edit files in the pro&ject folder")),
 		)
 		self.projectWritesCheck.SetValue(conf["allowProjectWrites"])
+		# No letter is left for this one (the panel avoids O, C and A); it is reached with Tab.
+		self.announceCheck = sHelper.addItem(
+			# Translators: Checkbox: say "Done: <conversation>" or "Failed: ..." when a question finishes while
+			# the user works in another application.
+			wx.CheckBox(self, label=_("Announce when answers finish while working in other apps")),
+		)
+		self.announceCheck.SetValue(conf["announceInOtherApps"])
 
 		self.timeoutCtrl = sHelper.addLabeledControl(
 			# Translators: Label of the timeout spin control.
@@ -1800,7 +2321,8 @@ class AskAISettingsPanel(SettingsPanel):
 				# Translators: Status when the check failed.
 				status = _("Could not check the status")
 			else:
-				status = statusText(providerId, loginState)
+				state.loginStates[providerId] = loginState
+				status = loginStatusText(providerId, loginState)
 			wx.CallAfter(self._setStatus, generation, status, announce)
 
 		threading.Thread(target=worker, name="askAI.status", daemon=True).start()
@@ -1918,6 +2440,8 @@ class AskAISettingsPanel(SettingsPanel):
 		def worker():
 			try:
 				ok, text = client.logout()
+				if ok:
+					state.loginStates[providerId] = providerBase.STATE_SIGNED_OUT
 				# Translators: Status after signing out.
 				status = _("Signed out") if ok else (text.splitlines()[0] if text else _("Not signed in"))
 			except ProviderError as e:
@@ -2023,6 +2547,7 @@ class AskAISettingsPanel(SettingsPanel):
 		conf["keepContext"] = self.contextCheck.GetValue()
 		conf["beepWhileWaiting"] = self.beepCheck.GetValue()
 		conf["allowProjectWrites"] = self.projectWritesCheck.GetValue()
+		conf["announceInOtherApps"] = self.announceCheck.GetValue()
 		conf["timeout"] = providerBase.clampTimeout(self.timeoutCtrl.GetValue())
 		conf["dictationSilenceTimeout"] = int(dictation.clampSilenceTimeout(self.dictationTimeoutCtrl.GetValue()))
 		conf["conversationsDir"] = self.conversationsDirCtrl.GetValue().strip()

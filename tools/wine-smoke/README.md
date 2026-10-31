@@ -26,6 +26,12 @@ so no ChatGPT or Claude usage is spent. Nothing here is shipped; `build.py` only
   Claude's model and effort lists), the Claude answer path (argv, stdin, "Claude:" label, provider stored), Claude in a
   project folder (file tools only, `acceptEdits`, cwd), a Claude sign-in error, the Service column, and both services in
   the settings ("Default AI service", "Account settings for", Claude's sign-in labels, path and sign-in code button).
+  Round 6 checks (`_round6a`): Ctrl+F through the real find prompt, F3 / Shift+F3 with wrap-around, "No matches for", Up/Down
+  question recall, Ctrl+S drafts restored on reopening, NVDA+Alt+Shift+S while answering and idle, and "Done: <title>." when the
+  answer arrives with the dialog closed. (`_round6b`): NVDA+Alt+A on a selected multi-line edit (a window in NVDA's own process,
+  because Wine without a window manager never brings Notepad to the foreground) with the Context field and a GDI screenshot sent as
+  `--image=`, refusal on a password field, Attach files (text inlined, picture as `--image=` for Codex, `--tools Read` in the
+  request folder for Claude), a long paste sent as question.txt, and the conversation manager's Search field.
 * `run.sh`: rebuilds the add-on, writes a fresh `userConfig` (silence synth, no welcome dialog, an `[askGPT]` section with
   `codexPath = C:\fakecodex\codex.cmd` for the migration), resets the conversation folders, `C:\smokeproject` and
   `Documents\Ask AI`, starts NVDA with debug logging on an Xvfb display, takes a screenshot at each test phase, checks that no
@@ -39,7 +45,7 @@ One-time setup (NVDA 2026.x fails under Wine 10.0: `GetConsoleSelectionInfo` is 
     wine nvda_2025.3.3.exe --create-portable-silent --portable-path='C:\nvda'   # files appear; the launcher may hang on exit
 
 Then run `tools/wine-smoke/run.sh` (pass `WINEPREFIX=` and `OUT=` if they are elsewhere; `ASKAI_SMOKE_ONLY=new` runs only
-the Ask AI 1.2 steps, which helps when Wine 10's wineserver crashes with `add_queue_hook_count: Assertion ... failed`
+the Ask AI 1.2 steps (`round6`, or `round6a`, `round6b`, `round6c` for a third of them each), which helps when Wine 10's wineserver crashes with `add_queue_hook_count: Assertion ... failed`
 after many short-lived processes; that crash also happens with the unchanged 1.1 harness). Output goes to
 `$HOME/nvda-wine/out` by default. Wine cannot show real speech, UIA/IA2 semantics, Win+H voice typing, the Codex
 Windows sandbox, a real Codex or Claude Code sign-in, or a real GitHub update download.

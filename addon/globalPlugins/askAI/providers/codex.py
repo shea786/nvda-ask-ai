@@ -133,13 +133,24 @@ def findCodex(userPath="", env=None, which=base.shutil.which, isFile=os.path.isf
 	return base.findExecutable("codex", candidatePaths(env, isWindows), userPath, which, isFile, isWindows)
 
 
-def buildExecArgs(outputFile, model="", reasoningEffort="", projectFolder="", allowWrites=False, isWindows=base.IS_WINDOWS):
+def buildExecArgs(
+	outputFile,
+	model="",
+	reasoningEffort="",
+	projectFolder="",
+	allowWrites=False,
+	isWindows=base.IS_WINDOWS,
+	images=(),
+):
 	"""Fixed codex exec arguments. The prompt is never on the command line; "-" reads it from stdin.
 	-c values are passed without quotes: Codex parses the value as TOML and, when that fails,
 	uses the raw text as a string (verified with codex-cli 0.160.0).
 	With a project folder, Codex works in it (-C). With allowWrites it may create and edit files there
 	(workspace-write), with network access explicitly off and /tmp and $TMPDIR not writable; otherwise
 	it stays read-only. The approval bypass flag is never used.
+	images (paths in the add-on's private request folder) are passed as --image=<path>
+	(`codex exec --help`: "-i, --image <FILE>...  Optional image(s) to attach to the initial prompt").
+	The option takes several values, so the images come before -o, which ends any list.
 	"""
 	sandbox = "workspace-write" if projectFolder and allowWrites else "read-only"
 	args = [
@@ -163,6 +174,8 @@ def buildExecArgs(outputFile, model="", reasoningEffort="", projectFolder="", al
 			"-c",
 			"sandbox_workspace_write.exclude_slash_tmp=true",
 		]
+	for image in images:
+		args.append("--image=%s" % image)
 	args += ["-o", outputFile]
 	model = (model or "").strip()
 	if model:
@@ -285,6 +298,7 @@ class CodexProvider(base.CliProvider):
 	logoutArgs = ("logout",)
 	loginAcceptsCode = False
 	defaultEfforts = REASONING_EFFORTS
+	imagesAttachedDirectly = True
 
 	@classmethod
 	def candidatePaths(cls, env=None, isWindows=base.IS_WINDOWS):
@@ -306,7 +320,7 @@ class CodexProvider(base.CliProvider):
 	def classifyFailure(self, returnCode, stdout, stderr, prompt=""):
 		return classifyFailure(returnCode, stdout, stderr, prompt)
 
-	def ask(self, prompt, cancelEvent=None, projectFolder=None, allowWrites=None, model=None, effort=None):
+	def ask(self, prompt, cancelEvent=None, projectFolder=None, allowWrites=None, model=None, effort=None, attachments=None):
 		"""Send prompt (already built with buildPrompt) and return the answer text."""
 		projectFolder, allowWrites, model, effort = self._requestSettings(projectFolder, allowWrites, model, effort)
 		self._checkProjectFolder(projectFolder)
@@ -322,6 +336,7 @@ class CodexProvider(base.CliProvider):
 				projectFolder=projectFolder,
 				allowWrites=allowWrites,
 				isWindows=self._isWindows,
+				images=attachments.imagePaths() if attachments is not None else (),
 			)
 			returnCode, stdout, stderr = self._run(
 				args,
